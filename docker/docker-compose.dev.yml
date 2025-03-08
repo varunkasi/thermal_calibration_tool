@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  thermal-calibration-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    container_name: thermal-calibration-dev
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      # Mount the project directory for live code editing
+      - ..:/opt/thermal_calibration
+    devices:
+      - /dev/video0:/dev/video0  # Adjust this based on your camera device
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - PYTHONPATH=/opt/thermal_calibration
+      # Environment variable to indicate development mode
+      - THERMAL_DEV_MODE=1
+    network_mode: host
+    privileged: true  # Required for direct hardware access
+    # Use interactive mode for development
+    stdin_open: true
+    tty: true
+    # Override the CMD with a command that keeps the container running
+    command: /bin/bash

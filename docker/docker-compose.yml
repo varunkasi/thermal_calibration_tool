@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  thermal-calibration:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: thermal-calibration
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      # Map calibration data to host for persistence
+      - ${HOME}/thermal_calibration_data:/opt/thermal_calibration/data
+    devices:
+      - /dev/video0:/dev/video0  # Adjust this based on your camera device
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+    network_mode: host
+    privileged: true  # Required for direct hardware access
+    restart: unless-stopped
+    # Ensure clean shutdown on container stop
+    stop_signal: SIGINT
+    stop_grace_period: 10s

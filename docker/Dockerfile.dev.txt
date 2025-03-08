@@ -1,0 +1,75 @@
+FROM ubuntu:22.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies including development tools
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3.10-dev \
+    python3.10-venv \
+    python3-pip \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+    libx11-6 \
+    libxtst6 \
+    libxi6 \
+    x11-apps \
+    udev \
+    libusb-1.0-0 \
+    libusb-1.0-0-dev \
+    git \
+    wget \
+    vim \
+    curl \
+    htop \
+    iputils-ping \
+    net-tools \
+    gdb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN useradd -m -s /bin/bash devuser && \
+    mkdir -p /opt/thermal_calibration && \
+    chown -R devuser:devuser /opt/thermal_calibration
+
+# Create symbolic link for python
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
+    ln -sf /usr/bin/pip3 /usr/bin/pip
+
+# Setup FLIR SDK (Using a placeholder since the exact SDK package name may vary)
+RUN mkdir -p /opt/flir/sdk
+WORKDIR /opt/flir/sdk
+
+# This is a placeholder - Replace with actual FLIR SDK installation steps
+# For example, you might need to copy SDK files from the host or download them
+# RUN wget https://path-to-flir-sdk/flir-sdk.tar.gz && \
+#    tar -xzf flir-sdk.tar.gz && \
+#    cd flir-sdk && \
+#    python setup.py install
+
+# Switch to devuser
+USER devuser
+
+# Set up Python environment with development dependencies
+WORKDIR /opt/thermal_calibration
+COPY --chown=devuser:devuser docker/requirements.txt docker/dev-requirements.txt ./
+RUN python -m pip install --upgrade pip && \
+    python -m pip install -r requirements.txt && \
+    python -m pip install -r dev-requirements.txt
+
+# Configure bash for better development experience
+RUN echo 'export PS1="\[\e[32m\]\u@thermal-dev\[\e[m\]:\[\e[34m\]\w\[\e[m\]$ "' >> ~/.bashrc && \
+    echo 'alias ll="ls -la"' >> ~/.bashrc
+
+# Mount points for camera device, shared X11 socket, and code volume
+VOLUME ["/dev/bus/usb", "/tmp/.X11-unix", "/opt/thermal_calibration"]
+
+# Set environment variable for display
+ENV DISPLAY=:0
+
+# Keep container running for development
+CMD ["bash"]

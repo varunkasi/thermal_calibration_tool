@@ -1,0 +1,11 @@
+pytest>=7.0.0
+pytest-cov>=3.0.0
+black>=22.1.0
+mypy>=0.931
+flake8>=4.0.1
+isort>=5.10.1
+pylint>=2.12.2
+ipython>=8.0.0
+ipdb>=0.13.9
+sphinx>=4.4.0
+sphinx-rtd-theme>=1.0.0

@@ -1,0 +1,11 @@
+numpy==1.24.2
+scipy>=1.8.0
+matplotlib>=3.5.0
+opencv-python>=4.5.5
+PyQt5>=5.15.6
+pyqtgraph>=0.12.4
+pyflir>=0.3.0  # Replace with actual FLIR SDK Python package if different
+pyyaml>=6.0
+loguru>=0.6.0
+typing-extensions>=4.1.0
+dataclasses-json>=0.5.7

@@ -7,8 +7,11 @@
       <group>
         <label>Visualization</label>
       </group>
+      <group>
+        <label>Thermal</label>
+      </group>
       <label>Thermal Camera Calibration</label>
-      <icon type="file">resource/icons/thermal_calibration.svg</icon>
+      <icon type="theme">camera-photo</icon>
       <statustip>Calibrate thermal camera using reference measurements.</statustip>
     </qtgui>
   </class>

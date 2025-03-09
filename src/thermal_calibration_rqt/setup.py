@@ -1,4 +1,6 @@
 from setuptools import setup, find_packages
+from glob import glob
+import os
 
 package_name = 'thermal_calibration_rqt'
 
@@ -12,7 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name, ['plugin.xml']),
         ('share/' + package_name + '/resource', ['resource/thermal_calibration.perspective']),
-        ('share/' + package_name + '/resource/icons', ['resource/icons/thermal_calibration.svg']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -24,6 +26,7 @@ setup(
     entry_points={
         'console_scripts': [
             'thermal_calibration_rqt = thermal_calibration_rqt.thermal_calibration_plugin:main',
+            'thermal_calibration_node = thermal_calibration_rqt.thermal_calibration_node:main',
         ],
         'rqt_gui.plugins': [
             'thermal_calibration = thermal_calibration_rqt.thermal_calibration_plugin:ThermalCalibrationPlugin',

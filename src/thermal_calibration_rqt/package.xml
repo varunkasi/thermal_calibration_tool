@@ -20,6 +20,18 @@
   <depend>python3-scipy</depend>
   <depend>python3-matplotlib</depend>
   <depend>python3-opencv</depend>
+  <depend>python3-pyqt5</depend>
+  <depend>python3-pyqt5.qtsvg</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+
+  <!-- Added dependencies -->
+  <exec_depend>usb_cam</exec_depend>
+  <exec_depend>mono16_converter</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>tmux</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

@@ -209,6 +209,15 @@ docker exec $CONTAINER_NAME bash -c "mkdir -p ${CONTAINER_DATA_DIR}"
 # Configure the Docker container for thermal calibration
 log_info "Configuring the container for thermal calibration..."
 
+# Install RQT dependencies if not already installed
+log_info "Installing required RQT packages..."
+docker exec -u 0 $CONTAINER_NAME bash -c "apt-get update && apt-get install -y \
+    ros-humble-rqt \
+    ros-humble-rqt-gui \
+    ros-humble-rqt-gui-py \
+    python3-rqt-gui \
+    python3-rqt-gui-py"
+
 # Install numpy 1.24.2 if not already installed
 docker exec $CONTAINER_NAME bash -c "pip3 list | grep -q 'numpy.*1.24.2' || pip3 install numpy==1.24.2"
 

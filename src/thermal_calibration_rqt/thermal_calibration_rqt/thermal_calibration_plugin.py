@@ -89,8 +89,10 @@ class ThermalCalibrationPlugin(PyPlugin):
         
     def _init_ros(self):
         """Initialize ROS node and subscribers."""
-        # Initialize ROS node in a separate thread
-        rclpy.init(args=None)
+        # Only initialize if not already initialized
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        
         self.node = rclpy.create_node('thermal_calibration_rqt')
         self._thread = threading.Thread(target=self._spin_thread)
         self._thread.daemon = True
@@ -144,11 +146,11 @@ def main(args=None):
     # For standalone use, we can't use the RQT context
     # This is only meant for testing outside of RQT
     print("Note: Running in standalone mode. Some features may be limited.")
-    rclpy.init(args=args)
+    if not rclpy.ok():
+        rclpy.init(args=args)
     from rqt_gui.main import Main
     main = Main()
     sys.exit(main.main(sys.argv, standalone='thermal_calibration_rqt.thermal_calibration_plugin:ThermalCalibrationPlugin'))
-
 
 if __name__ == '__main__':
     main()

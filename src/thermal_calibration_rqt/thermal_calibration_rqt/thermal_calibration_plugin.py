@@ -21,7 +21,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 import threading
 
-from rqt_gui.plugin import Plugin
+from qt_gui.plugin import Plugin
 from rqt_gui_py.plugin import Plugin as PyPlugin
 
 from sensor_msgs.msg import Image

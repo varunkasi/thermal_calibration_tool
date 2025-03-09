@@ -1,5 +1,5 @@
 <library path="thermal_calibration_rqt">
-  <class name="ThermalCalibration" type="thermal_calibration_rqt.thermal_calibration_plugin:ThermalCalibrationPlugin" base_class_type="rqt_gui_py::Plugin">
+  <class name="ThermalCalibration" type="thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin" base_class_type="rqt_gui_py::Plugin">
     <description>
       RQT plugin for thermal camera calibration.
     </description>

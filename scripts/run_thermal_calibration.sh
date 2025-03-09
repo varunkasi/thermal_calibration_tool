@@ -276,6 +276,8 @@ else
     fi
 fi
 
+ROS_SOURCE_CMD=". /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD}"
+
 # Build the thermal calibration packages if needed and if they exist
 if [ "$BUILD_PACKAGES" = true ]; then
     # Check if thermal calibration packages exist
@@ -347,12 +349,13 @@ else
     log_info "Skipping package build as requested."
 fi
 
+# Define ROS source command that ensures both ROS and workspace are sourced
+ROS_SOURCE_CMD=". /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD}"
+
 # Create the tmux session for running multiple commands
 log_info "Setting up tmux session for thermal calibration..."
 docker exec $CONTAINER_NAME bash -c "tmux new-session -d -s thermal_calibration || true"
 
-# Define ROS source command that ensures both ROS and workspace are sourced
-ROS_SOURCE_CMD=". /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD}"
 
 # Start usb_cam node if not skipped
 if [ "$SKIP_CAM" = false ]; then

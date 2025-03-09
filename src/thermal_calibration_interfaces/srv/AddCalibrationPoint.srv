@@ -1,0 +1,10 @@
+# Request
+uint16 x                   # X coordinate in the image
+uint16 y                   # Y coordinate in the image
+uint16 raw_value           # Raw thermal sensor value
+float32 reference_temp     # Reference temperature in Celsius
+---
+# Response
+bool success               # Whether the operation was successful
+string message             # Status message
+uint32 point_id            # ID of the added point, -1 if failed

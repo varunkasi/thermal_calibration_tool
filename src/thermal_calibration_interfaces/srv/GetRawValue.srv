@@ -1,0 +1,8 @@
+# Request
+uint16 x  # X coordinate in the image
+uint16 y  # Y coordinate in the image
+---
+# Response
+bool success               # Whether the operation was successful
+string message             # Status message
+uint16 raw_value           # Raw thermal sensor value at the coordinates

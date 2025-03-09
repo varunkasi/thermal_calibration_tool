@@ -20,7 +20,7 @@ setup(
     maintainer_email='user@example.com',
     description='RQT plugin for thermal camera calibration',
     license='MIT',
-    tests_require=['pytest'],
+    extras_require={'test': ['pytest']},
     entry_points={
         'console_scripts': [
             'thermal_calibration_rqt = thermal_calibration_rqt.thermal_calibration_plugin:main',

@@ -206,6 +206,26 @@ log_info "Configuring the container for thermal calibration..."
 # Install numpy 1.24.2 if not already installed
 docker exec $CONTAINER_NAME bash -c "pip3 list | grep -q 'numpy.*1.24.2' || pip3 install numpy==1.24.2"
 
+# Fix packaging and setuptools to handle common build errors
+log_info "Setting up Python package environment to prevent common build errors..."
+docker exec $CONTAINER_NAME bash -c "pip3 install setuptools==58.2.0 wheel==0.37.1 packaging==21.3"
+
+# Fix setuptools tests_require issue in setup.py files
+log_info "Checking for potential package build issues..."
+if docker exec $CONTAINER_NAME bash -c "[ -f ${CONTAINER_WORKSPACE_DIR}/src/thermal_calibration_tool/src/thermal_calibration_rqt/setup.py ]"; then
+    log_info "Checking thermal_calibration_rqt setup.py file for potential issues..."
+    # Check if setup.py contains tests_require
+    if docker exec $CONTAINER_NAME bash -c "grep -q 'tests_require' ${CONTAINER_WORKSPACE_DIR}/src/thermal_calibration_tool/src/thermal_calibration_rqt/setup.py"; then
+        log_info "Detected 'tests_require' in setup.py, fixing compatibility issue..."
+        # Create a backup
+        docker exec $CONTAINER_NAME bash -c "cp ${CONTAINER_WORKSPACE_DIR}/src/thermal_calibration_tool/src/thermal_calibration_rqt/setup.py ${CONTAINER_WORKSPACE_DIR}/src/thermal_calibration_tool/src/thermal_calibration_rqt/setup.py.bak"
+        # Replace tests_require with extras_require
+        docker exec $CONTAINER_NAME bash -c "sed -i 's/tests_require=\[/extras_require={\"test\": \[/g' ${CONTAINER_WORKSPACE_DIR}/src/thermal_calibration_tool/src/thermal_calibration_rqt/setup.py"
+        docker exec $CONTAINER_NAME bash -c "sed -i 's/\],  # Add pytest and any other test dependencies here/\]},  # Add pytest and any other test dependencies here/g' ${CONTAINER_WORKSPACE_DIR}/src/thermal_calibration_tool/src/thermal_calibration_rqt/setup.py"
+        log_success "Fixed setup.py file."
+    fi
+fi
+
 # Install tmux if not already installed - use docker exec with root user
 log_info "Checking if tmux is installed in the container..."
 if ! docker exec $CONTAINER_NAME bash -c "command -v tmux >/dev/null 2>&1"; then
@@ -250,10 +270,15 @@ if [ "$BUILD_PACKAGES" = true ]; then
         # Build interfaces package first if it exists
         if [ "$INTERFACES_EXISTS" = "1" ]; then
             log_info "Building thermal_calibration_interfaces package..."
-            docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && . /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD} colcon build --symlink-install --packages-select thermal_calibration_interfaces"
+            docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && . /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD} PYTHONPATH= colcon build --symlink-install --packages-select thermal_calibration_interfaces"
             
             if [ $? -ne 0 ]; then
                 log_error "Failed to build thermal_calibration_interfaces package."
+                
+                # Attempt to fix by rebuilding with the current setup
+                log_info "Attempting to fix build issues..."
+                docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && rm -rf build/thermal_calibration_interfaces install/thermal_calibration_interfaces log/latest_build/thermal_calibration_interfaces"
+                docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && . /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD} PYTHONPATH= colcon build --symlink-install --packages-select thermal_calibration_interfaces"
             else
                 log_success "Successfully built thermal_calibration_interfaces package."
                 # Update workspace setup command to include newly built packages
@@ -266,10 +291,15 @@ if [ "$BUILD_PACKAGES" = true ]; then
         # Build RQT plugin package if it exists
         if [ "$RQT_EXISTS" = "1" ]; then
             log_info "Building thermal_calibration_rqt package..."
-            docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && . /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD} colcon build --symlink-install --packages-select thermal_calibration_rqt"
+            docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && . /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD} PYTHONPATH= colcon build --symlink-install --packages-select thermal_calibration_rqt"
             
             if [ $? -ne 0 ]; then
                 log_error "Failed to build thermal_calibration_rqt package."
+                
+                # Attempt to fix by rebuilding with the current setup
+                log_info "Attempting to fix build issues..."
+                docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && rm -rf build/thermal_calibration_rqt install/thermal_calibration_rqt log/latest_build/thermal_calibration_rqt"
+                docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && . /opt/ros/humble/setup.bash && ${WORKSPACE_SETUP_CMD} PYTHONPATH= colcon build --symlink-install --packages-select thermal_calibration_rqt"
             else
                 log_success "Successfully built thermal_calibration_rqt package."
                 # Update workspace setup command to include newly built packages
@@ -277,6 +307,20 @@ if [ "$BUILD_PACKAGES" = true ]; then
             fi
         else
             log_warning "thermal_calibration_rqt package not found in workspace."
+        fi
+        
+        # Check if the packages were successfully built
+        log_info "Checking if packages were successfully built..."
+        if docker exec $CONTAINER_NAME bash -c "${ROS_SOURCE_CMD} ros2 pkg list | grep -q thermal_calibration_rqt"; then
+            log_success "thermal_calibration_rqt package is available in ROS environment."
+        else
+            log_warning "thermal_calibration_rqt package is NOT available in ROS environment."
+        fi
+        
+        if docker exec $CONTAINER_NAME bash -c "${ROS_SOURCE_CMD} ros2 pkg list | grep -q thermal_calibration_interfaces"; then
+            log_success "thermal_calibration_interfaces package is available in ROS environment."
+        else
+            log_warning "thermal_calibration_interfaces package is NOT available in ROS environment."
         fi
     else
         log_warning "No thermal calibration packages found in the workspace."

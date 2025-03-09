@@ -25,5 +25,8 @@ setup(
         'console_scripts': [
             'thermal_calibration_rqt = thermal_calibration_rqt.thermal_calibration_plugin:main',
         ],
+        'rqt_gui.plugins': [
+            'thermal_calibration = thermal_calibration_rqt.thermal_calibration_plugin:ThermalCalibrationPlugin',
+        ],
     },
 )

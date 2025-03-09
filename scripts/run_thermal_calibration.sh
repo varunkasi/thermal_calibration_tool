@@ -214,7 +214,8 @@ log_info "Installing required RQT packages..."
 docker exec -u 0 $CONTAINER_NAME bash -c "apt-get update && apt-get install -y \
     ros-humble-rqt \
     ros-humble-rqt-gui \
-    ros-humble-rqt-gui-py"
+    ros-humble-rqt-gui-py \
+    ros-humble-qt-gui"
 
 # Install numpy 1.24.2 if not already installed
 docker exec $CONTAINER_NAME bash -c "pip3 list | grep -q 'numpy.*1.24.2' || pip3 install numpy==1.24.2"

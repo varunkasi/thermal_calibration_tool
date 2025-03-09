@@ -8,7 +8,7 @@
         <label>Visualization</label>
       </group>
       <label>Thermal Camera Calibration</label>
-      <icon type="theme">video-display</icon>
+      <icon type="file">resource/icons/thermal_calibration.svg</icon>
       <statustip>Calibrate thermal camera using reference measurements.</statustip>
     </qtgui>
   </class>

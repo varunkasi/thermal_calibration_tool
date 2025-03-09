@@ -141,12 +141,13 @@ class ThermalCalibrationPlugin(PyPlugin):
 
 def main(args=None):
     """Main function to allow standalone operation of the plugin."""
+    # For standalone use, we can't use the RQT context
+    # This is only meant for testing outside of RQT
+    print("Note: Running in standalone mode. Some features may be limited.")
     rclpy.init(args=args)
-    node = rclpy.create_node('thermal_calibration_standalone')
-    plugin = ThermalCalibrationPlugin(node)
-    plugin.shutdown_plugin()
-    node.destroy_node()
-    rclpy.shutdown()
+    from rqt_gui.main import Main
+    main = Main()
+    sys.exit(main.main(sys.argv, standalone='thermal_calibration_rqt.thermal_calibration_plugin:ThermalCalibrationPlugin'))
 
 
 if __name__ == '__main__':

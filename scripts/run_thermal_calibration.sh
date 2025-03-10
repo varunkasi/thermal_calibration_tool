@@ -260,13 +260,19 @@ log_info "Setting up workspace for thermal calibration..."
 # Always source ROS humble first
 ROS_BASE_CMD=". /opt/ros/humble/setup.bash"
 
-# Build the thermal calibration packages (unconditionally)
-log_info "Building thermal calibration packages..."
-docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && ${ROS_BASE_CMD} && colcon build --symlink-install --packages-select thermal_calibration_interfaces thermal_calibration_rqt"
-
-# Verify the build was successful
-if ! docker exec $CONTAINER_NAME bash -c "[ -f ${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/package.xml ]"; then
-    log_warning "Build may have failed. Continuing anyway but services might not be available."
+# Only build the thermal calibration packages if needed
+if [ "$BUILD_PACKAGES" = true ] && ! docker exec $CONTAINER_NAME bash -c "[ -f ${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/package.xml ]"; then
+    log_info "Building thermal calibration packages..."
+    docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && ${ROS_BASE_CMD} && colcon build --symlink-install --packages-select thermal_calibration_interfaces thermal_calibration_rqt"
+    
+    # Verify the build was successful
+    if ! docker exec $CONTAINER_NAME bash -c "[ -f ${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/package.xml ]"; then
+        log_warning "Build may have failed. Continuing anyway but services might not be available."
+    else
+        log_success "Thermal calibration packages built successfully."
+    fi
+else
+    log_info "Thermal calibration packages are already built, skipping build step."
 fi
 
 # Definitive ROS source command - always source workspace regardless of build status
@@ -275,22 +281,20 @@ ROS_SOURCE_CMD="${ROS_BASE_CMD} && ${WORKSPACE_SETUP_CMD}"
 
 log_info "Using ROS environment with command: ${ROS_SOURCE_CMD}"
 
-
 # Create the tmux session for running multiple commands
 log_info "Setting up tmux session for thermal calibration..."
 docker exec $CONTAINER_NAME bash -c "tmux new-session -d -s thermal_calibration || true"
 
-
 # Start usb_cam node if not skipped
 if [ "$SKIP_CAM" = false ]; then
     log_info "Starting usb_cam node..."
-    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:0 '${ROS_SOURCE_CMD} ros2 run usb_cam usb_cam_node_exe --ros-args --params-file ${CONTAINER_PARAMS_FILE} || echo \"Failed to start usb_cam node. Check if the package is installed.\"' C-m"
+    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:0 '${ROS_SOURCE_CMD} && ros2 run usb_cam usb_cam_node_exe --ros-args --params-file ${CONTAINER_PARAMS_FILE} || echo \"Failed to start usb_cam node. Check if the package is installed.\"' C-m"
     
     # Wait for usb_cam to start
     sleep 5
     
     # Check if usb_cam node is running
-    if ! docker exec $CONTAINER_NAME bash -c "${ROS_SOURCE_CMD} ros2 node list 2>/dev/null | grep -q '/usb_cam'"; then
+    if ! docker exec $CONTAINER_NAME bash -c "${ROS_SOURCE_CMD} && ros2 node list 2>/dev/null | grep -q '/usb_cam'"; then
         log_warning "usb_cam node may not have started properly. Continuing anyway..."
     else
         log_success "usb_cam node is running."
@@ -302,7 +306,7 @@ fi
 # Start mono16_converter
 log_info "Starting mono16_converter node..."
 docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:1 -n mono16_converter"
-docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:1 '${ROS_SOURCE_CMD} ros2 run mono16_converter mono16_converter || echo \"Failed to start mono16_converter. Check if the package is installed.\"' C-m"
+docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:1 '${ROS_SOURCE_CMD} && ros2 run mono16_converter mono16_converter || echo \"Failed to start mono16_converter. Check if the package is installed.\"' C-m"
 
 # Wait for mono16_converter to start
 sleep 3
@@ -313,11 +317,11 @@ log_info "Starting thermal calibration system..."
 if [ "$USE_LAUNCH" = true ]; then
     # Start using launch file
     docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:2 -n thermal_calibration"
-    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} ros2 launch thermal_calibration_rqt thermal_calibration.launch.py' C-m"
+    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} && ros2 launch thermal_calibration_rqt thermal_calibration.launch.py' C-m"
 else
     # Start thermal calibration node
     docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:2 -n calibration_node"
-    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} ros2 run thermal_calibration_rqt thermal_calibration_node' C-m"
+    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} && ros2 run thermal_calibration_rqt thermal_calibration_node' C-m"
     
     # Start the thermal calibration rqt plugin
     docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:3 -n rqt"
@@ -327,10 +331,10 @@ else
         log_info "Starting thermal calibration rqt plugin..."
         PERSPECTIVE_PATH="${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/resource/thermal_calibration.perspective"
         # Check if perspective file exists
-        docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} rqt --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin' C-m"
+        docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} && rqt --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin' C-m"
     else
         log_info "Starting standard rqt (thermal calibration plugin not installed)..."
-        docker exec -it $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} rqt' C-m"
+        docker exec -it $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} && rqt' C-m"
     fi
 fi
 

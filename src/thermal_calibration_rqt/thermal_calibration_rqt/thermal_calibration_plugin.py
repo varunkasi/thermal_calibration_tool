@@ -1167,6 +1167,31 @@ class ThermalCalibrationPlugin(PyPlugin):
         elif hasattr(self, 'current_image') and self.current_image is not None:
             self._update_display_from_16bit()
 
+    def _try_reconnect_services(self):
+        """Try to reconnect to any unavailable services."""
+        services_to_check = [
+            (self.get_raw_value_client, 'get_raw_value'),
+            (self.add_calibration_point_client, 'add_calibration_point'),
+            (self.perform_calibration_client, 'perform_calibration'),
+            (self.clear_calibration_data_client, 'clear_calibration_data'),
+            (self.raw_to_temperature_client, 'raw_to_temperature'),
+            (self.save_calibration_model_client, 'save_calibration_model'),
+            (self.load_calibration_model_client, 'load_calibration_model')
+        ]
+        
+        reconnected = False
+        
+        for client, name in services_to_check:
+            if client is not None and not client.service_is_ready():
+                if client.wait_for_service(timeout_sec=0.1):
+                    self._node.get_logger().info(f'Successfully reconnected to {name} service')
+                    reconnected = True
+        
+        # If any service was reconnected, update UI accordingly
+        if reconnected:
+            # We might want to update UI elements to reflect service availability
+            # For example, enable/disable buttons that depend on services
+            pass
 
 def main(args=None):
     """Main function to allow standalone operation of the plugin."""

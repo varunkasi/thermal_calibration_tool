@@ -9,7 +9,7 @@ import cv2
 from cv_bridge import CvBridge
 
 from python_qt_binding import loadUi
-from python_qt_binding.QtCore import Qt, QTimer, Signal, Slot, QObject, QMutex, QMutexLocker
+from python_qt_binding.QtCore import Qt, QTimer, Signal, Slot, QObject, QMutex, QMutexLocker, pyqtSignal
 from python_qt_binding.QtGui import QImage, QPixmap, QPen, QColor
 from python_qt_binding.QtWidgets import (QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                                          QLabel, QSplitter, QTableWidget, QTableWidgetItem,
@@ -31,6 +31,11 @@ from thermal_calibration_interfaces.srv import (
     GetRawValue, AddCalibrationPoint, PerformCalibration, ClearCalibrationData, 
     RawToTemperature, SaveCalibrationModel, LoadCalibrationModel
 )
+
+# Add this after your imports, before the ThermalImageView class
+class SignalHelper(QObject):
+    """Helper class to hold Qt signals."""
+    image_update_signal = pyqtSignal(object)
 
 class ThermalImageView(QLabel):
     """Custom widget for displaying the thermal image with interactive features."""
@@ -178,7 +183,6 @@ class ThermalImageView(QLabel):
 
 
 class ThermalCalibrationPlugin(PyPlugin):
-
     """
     RQT plugin for thermal camera calibration.
     
@@ -224,15 +228,15 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.last_raw_values = {}  # Store raw values by coordinates to maintain consistency
         self.image_mutex = QMutex()  # For thread safety
         
-        # Define signals for thread-safe UI updates
-        self.image_update_signal = Signal(object)  # Create signal as instance variable
-        self.image_update_signal.connect(self._update_image_display_from_signal)  # Connect signal
-        
         # Define callback groups for threading safety
         self.callback_group = ReentrantCallbackGroup()
         
         # Initialize UI
         self._init_ui()
+        
+        # Set up signal helper and connect signals
+        self.signal_helper = SignalHelper()
+        self.signal_helper.image_update_signal.connect(self._update_image_display_from_signal)
         
         # Initialize ROS communication
         self._setup_ros_communication()
@@ -516,7 +520,7 @@ class ThermalCalibrationPlugin(PyPlugin):
                 # Instead of directly updating the display, emit signal for main thread to handle
                 display_img = cv2.normalize(self.current_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                 colored_img = cv2.applyColorMap(display_img, cv2.COLORMAP_INFERNO)
-                self.image_update_signal.emit(colored_img)
+                self.signal_helper.image_update_signal.emit(colored_img)
             
             # If we have selected coordinates, update the raw value
             if hasattr(self, 'selected_coords') and self.selected_coords:
@@ -589,7 +593,7 @@ class ThermalCalibrationPlugin(PyPlugin):
                 colored_img = cv2.applyColorMap(img_8bit, colormap)
             
             # Send the colored image via signal to the main thread for UI update
-            self.image_update_signal.emit(colored_img)
+            self.signal_helper.image_update_signal.emit(colored_img)
         
         except Exception as e:
             self._node.get_logger().error(f'Error processing 8-bit image: {e}')

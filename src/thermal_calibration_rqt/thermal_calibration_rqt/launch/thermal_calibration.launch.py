@@ -51,10 +51,10 @@ def generate_launch_description():
     # Define RQT with thermal calibration plugin - force load our plugin explicitly
     rqt_process = ExecuteProcess(
         cmd=['rqt', 
-             '--force-discover', 
-             '--perspective-file', perspective_path,
-             '--clear-config',
-             '-s', 'thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin'],
+            '--force-discover', 
+            '--perspective-file', perspective_path,
+            '--clear-config',
+            '--standalone', 'thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin'],
         output='screen',
         condition=IfCondition(LaunchConfiguration('launch_rqt'))
     )

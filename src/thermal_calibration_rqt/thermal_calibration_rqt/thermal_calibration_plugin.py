@@ -34,8 +34,12 @@ class ThermalImageView(QLabel):
         super(ThermalImageView, self).__init__(parent)
         self.selected_point = None
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(320, 240)
+        self.setMinimumSize(640, 480)  # Increase minimum size
         self.setCursor(Qt.CrossCursor)
+        
+        # Set better size policy to maximize use of available space
+        from python_qt_binding.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
     def mousePressEvent(self, event):
         """Handle mouse press events to select a pixel."""
@@ -188,10 +192,11 @@ class ThermalCalibrationPlugin(PyPlugin):
         # Left panel (thermal image)
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        
+        left_layout.setContentsMargins(0, 0, 0, 0)  # Reduce margins
+
         # Thermal image view
         self.image_view = ThermalImageView()
-        left_layout.addWidget(self.image_view)
+        left_layout.addWidget(self.image_view, 1)  # Give it a stretch factor of 1
         
         # Connect pixel_clicked signal
         self.image_view.pixel_clicked.connect(self._on_pixel_clicked)
@@ -216,6 +221,16 @@ class ThermalCalibrationPlugin(PyPlugin):
         # Top section - Controls for entering reference temperatures
         controls_group = QWidget()
         controls_layout = QVBoxLayout(controls_group)
+
+        # Colormap selection
+        colormap_layout = QHBoxLayout()
+        colormap_layout.addWidget(QLabel("Colormap:"))
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems(["Grayscale", "Inferno", "Jet", "Viridis", "Rainbow"])
+        self.colormap_combo.setCurrentText("Grayscale")  # Set default to grayscale
+        self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
+        colormap_layout.addWidget(self.colormap_combo)
+        controls_layout.addLayout(colormap_layout)
         
         # Button to enter temperature
         self.enter_temp_btn = QPushButton("Enter temperature value")
@@ -321,9 +336,9 @@ class ThermalCalibrationPlugin(PyPlugin):
         # Add panels to splitter
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        
-        # Set initial splitter sizes (40% left, 60% right)
-        splitter.setSizes([400, 600])
+
+        # Set initial splitter sizes (70% left, 30% right)
+        splitter.setSizes([700, 300])  # Change from [400, 600] to give more space to the image
         
         # Create timer for regular UI updates
         self.update_timer = QTimer(self._widget)
@@ -395,19 +410,54 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Convert ROS image message to OpenCV image
             img_8bit = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono8")
             
-            # Apply color map to 8-bit image
-            colored_img = cv2.applyColorMap(img_8bit, cv2.COLORMAP_INFERNO)
+            # Store the image for colormap changes
+            self.last_8bit_image = img_8bit
+            
+            # Update the display with the current image
+            self._update_image_display(img_8bit)
+        
+        except Exception as e:
+            self._node.get_logger().error(f'Error processing 8-bit image: {e}')
+
+    def _update_image_display(self, img_8bit):
+        """Update the image display with the given 8-bit image using the selected colormap."""
+        try:
+            # Apply selected colormap
+            if not hasattr(self, 'current_colormap'):
+                self.current_colormap = "Grayscale"
+                
+            if self.current_colormap == "Grayscale":
+                # For grayscale, we don't apply a colormap, but convert to RGB
+                colored_img = cv2.cvtColor(img_8bit, cv2.COLOR_GRAY2BGR)
+            else:
+                # Map colormap name to OpenCV constant
+                colormap_map = {
+                    "Inferno": cv2.COLORMAP_INFERNO,
+                    "Jet": cv2.COLORMAP_JET,
+                    "Viridis": cv2.COLORMAP_VIRIDIS,
+                    "Rainbow": cv2.COLORMAP_RAINBOW
+                }
+                colormap = colormap_map.get(self.current_colormap, cv2.COLORMAP_INFERNO)
+                colored_img = cv2.applyColorMap(img_8bit, colormap)
             
             # Convert OpenCV image to QImage then QPixmap for display
             h, w, c = colored_img.shape
             q_img = QImage(colored_img.data, w, h, w * c, QImage.Format_RGB888).rgbSwapped()
             pixmap = QPixmap.fromImage(q_img)
             
+            # Scale the pixmap to fit the view while maintaining aspect ratio
+            scaled_pixmap = pixmap.scaled(
+                self.image_view.width(), 
+                self.image_view.height(),
+                Qt.KeepAspectRatio, 
+                Qt.SmoothTransformation
+            )
+            
             # Update image view
-            self.image_view.setPixmap(pixmap)
+            self.image_view.setPixmap(scaled_pixmap)
         
         except Exception as e:
-            self._node.get_logger().error(f'Error processing 8-bit image: {e}')
+            self._node.get_logger().error(f'Error updating image display: {e}')
     
     def _update_display_from_16bit(self):
         """Update the display using the 16-bit image when 8-bit stream is not available."""
@@ -433,6 +483,7 @@ class ThermalCalibrationPlugin(PyPlugin):
     def _on_pixel_clicked(self, x, y):
         """Handle pixel selection in the image."""
         if self.current_image is None:
+            self._node.get_logger().warn('No thermal image available')
             return
             
         try:
@@ -441,20 +492,27 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Update coordinate display
             self.coords_label.setText(f"Coordinates: ({x}, {y})")
             
+            # Debug output
+            self._node.get_logger().info(f'Click at coordinates ({x}, {y})')
+            self._node.get_logger().info(f'Image shape: {self.current_image.shape}')
+            
             # Get raw value from the image
             if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
                 raw_value = int(self.current_image[y, x])
                 self.current_raw_value = raw_value
                 self.raw_value_label.setText(f"Raw value: {raw_value}")
                 
-                # Enable the button to enter temperature
+                # Force enable the button to enter temperature
                 self.enter_temp_btn.setEnabled(True)
+                self._node.get_logger().info(f'Enter temp button enabled: {self.enter_temp_btn.isEnabled()}')
                 
                 # If in radiometric mode, update temperature display
                 if self.radiometric_mode and self.calibration_model:
                     self._update_temperature_display(raw_value)
                 else:
                     self.temp_label.setText("Temperature: -")
+            else:
+                self._node.get_logger().warn(f'Coordinates ({x}, {y}) out of bounds. Image shape: {self.current_image.shape}')
         
         except Exception as e:
             self._node.get_logger().error(f'Error handling pixel click: {e}')
@@ -596,7 +654,16 @@ class ThermalCalibrationPlugin(PyPlugin):
             self.cal_results_label.setText("No calibration performed yet")
             self.export_btn.setEnabled(False)
             self.radio_toggle.setEnabled(False)
-    
+
+    def _on_colormap_changed(self, colormap_name):
+        """Handle change in colormap selection."""
+        self.current_colormap = colormap_name
+        # Refresh the display if we have an image
+        if hasattr(self, 'has_8bit_stream') and self.has_8bit_stream and hasattr(self, 'last_8bit_image'):
+            self._update_image_display(self.last_8bit_image)
+        elif self.current_image is not None:
+            self._update_display_from_16bit()
+
     # Service call methods
     
     def _call_get_raw_value(self, x, y):

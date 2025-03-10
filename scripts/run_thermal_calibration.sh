@@ -292,57 +292,54 @@ fi
 # Ensure workspace directory exists
 docker exec $CONTAINER_NAME bash -c "mkdir -p ${CONTAINER_WORKSPACE_DIR}/src"
 
-# Check if the required packages exist in the workspace
+# Replace the package checking section with this direct approach
 log_info "Checking for required ROS packages in the workspace..."
-# Create a simple script to check for packages
-docker exec $CONTAINER_NAME bash -c "cat > /tmp/check_packages.sh << 'EOF'
-#!/bin/bash
-source /opt/ros/humble/setup.bash
-if [ -f \$1/install/setup.bash ]; then
-  source \$1/install/setup.bash
-  MISSING=""
-  ros2 pkg list | grep -q 'usb_cam' || MISSING="\$MISSING usb_cam"
-  ros2 pkg list | grep -q 'mono16_converter' || MISSING="\$MISSING mono16_converter"
-  ros2 pkg list | grep -q 'thermal_calibration_interfaces' || MISSING="\$MISSING thermal_calibration_interfaces"
-  ros2 pkg list | grep -q 'thermal_calibration_rqt' || MISSING="\$MISSING thermal_calibration_rqt"
-  if [ -z "\$MISSING" ]; then
-    echo 'all_found'
-  else
-    echo "missing:\$MISSING"
-  fi
-else
-  echo 'setup_missing'
-fi
-EOF
-chmod +x /tmp/check_packages.sh"
 
-# Run the script
-PACKAGES_CHECK=$(docker exec $CONTAINER_NAME bash -c "/tmp/check_packages.sh ${CONTAINER_WORKSPACE_DIR}")
+# Check each package individually with direct commands
+docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && ros2 pkg list | grep -q 'usb_cam'" 2>/dev/null
+HAS_USB_CAM=$?
 
-# Only build if packages are missing or build is forced
-if [ "$PACKAGES_CHECK" != "all_found" ]; then
-    log_warning "Some required packages are missing: ${PACKAGES_CHECK#missing:}. Setting BUILD_PACKAGES=true."
+docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && ros2 pkg list | grep -q 'mono16_converter'" 2>/dev/null
+HAS_MONO16=$?
+
+docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && ros2 pkg list | grep -q 'thermal_calibration_interfaces'" 2>/dev/null
+HAS_INTERFACES=$?
+
+docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && ros2 pkg list | grep -q 'thermal_calibration_rqt'" 2>/dev/null
+HAS_RQT=$?
+
+# Determine which packages are missing
+MISSING_PACKAGES=""
+[ $HAS_USB_CAM -ne 0 ] && MISSING_PACKAGES="$MISSING_PACKAGES usb_cam"
+[ $HAS_MONO16 -ne 0 ] && MISSING_PACKAGES="$MISSING_PACKAGES mono16_converter"
+[ $HAS_INTERFACES -ne 0 ] && MISSING_PACKAGES="$MISSING_PACKAGES thermal_calibration_interfaces"
+[ $HAS_RQT -ne 0 ] && MISSING_PACKAGES="$MISSING_PACKAGES thermal_calibration_rqt"
+
+# Set build flag based on missing packages
+if [ -n "$MISSING_PACKAGES" ]; then
+    log_warning "Missing packages:$MISSING_PACKAGES"
     BUILD_PACKAGES=true
 else
     log_info "All required packages found: usb_cam, mono16_converter, thermal_calibration_interfaces, thermal_calibration_rqt"
 fi
 
+# Update the build logic to use MISSING_PACKAGES instead of PACKAGES_CHECK
 if [ "$BUILD_PACKAGES" = true ]; then
     log_info "Building missing thermal calibration packages..."
     
     # Clean build if requested
     if [ "$CLEAN_BUILD" = true ]; then
         log_info "Cleaning previous build artifacts..."
-        if [[ "$PACKAGES_CHECK" == *"thermal_calibration_interfaces"* ]]; then
+        if [[ "$MISSING_PACKAGES" == *"thermal_calibration_interfaces"* ]]; then
             docker exec $CONTAINER_NAME bash -c "rm -rf ${CONTAINER_WORKSPACE_DIR}/build/thermal_calibration_interfaces"
         fi
-        if [[ "$PACKAGES_CHECK" == *"thermal_calibration_rqt"* ]]; then
+        if [[ "$MISSING_PACKAGES" == *"thermal_calibration_rqt"* ]]; then
             docker exec $CONTAINER_NAME bash -c "rm -rf ${CONTAINER_WORKSPACE_DIR}/build/thermal_calibration_rqt"
         fi
     fi
     
     # Build only the missing packages individually for better error handling
-    if [[ "$PACKAGES_CHECK" == *"thermal_calibration_interfaces"* ]]; then
+    if [[ "$MISSING_PACKAGES" == *"thermal_calibration_interfaces"* ]]; then
         log_info "Building missing package: thermal_calibration_interfaces..."
         docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && cd ${CONTAINER_WORKSPACE_DIR} && \
           colcon build --symlink-install --packages-select thermal_calibration_interfaces"
@@ -354,7 +351,7 @@ if [ "$BUILD_PACKAGES" = true ]; then
         fi
     fi
     
-    if [[ "$PACKAGES_CHECK" == *"thermal_calibration_rqt"* ]]; then
+    if [[ "$MISSING_PACKAGES" == *"thermal_calibration_rqt"* ]]; then
         log_info "Building missing package: thermal_calibration_rqt..."
         docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && \
           [ -f ${CONTAINER_WORKSPACE_DIR}/install/setup.bash ] && \

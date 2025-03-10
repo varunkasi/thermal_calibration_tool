@@ -51,7 +51,10 @@ class ThermalImageView(QLabel):
         self.selected_point = None
         self.calibration_points = []  # List to store saved calibration points
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(640, 480)
+        
+        # Increase the minimum size to ensure we have enough space
+        self.setMinimumSize(800, 600)
+        
         self.setCursor(Qt.CrossCursor)
         self.image_width = 0
         self.image_height = 0
@@ -59,6 +62,11 @@ class ThermalImageView(QLabel):
         # Set better size policy to maximize use of available space
         from python_qt_binding.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        # Set a frame around the image for better visibility
+        self.setFrameShape(QLabel.Box)
+        self.setFrameShadow(QLabel.Sunken)
+        self.setLineWidth(1)
         
     def add_calibration_point(self, x, y, temp, raw_value):
         """Add a point to the calibration points list."""
@@ -138,6 +146,18 @@ class ThermalImageView(QLabel):
         from python_qt_binding.QtCore import QRect
         return QRect(int(x), int(y), scaledSize.width(), scaledSize.height())
     
+    def resizeEvent(self, event):
+        """Handle resize events to properly scale the image."""
+        super(ThermalImageView, self).resizeEvent(event)
+        
+        # If we have a pixmap, make sure it's scaled properly after resize
+        if not self.pixmap() or self.pixmap().isNull():
+            return
+            
+        # We don't actually rescale here to avoid threading issues
+        # Just let the plugin know the size changed
+        # The plugin will handle the rescaling through the image update cycle
+        
     def paintEvent(self, event):
         """Override paint event to draw selection marker and calibration points."""
         super(ThermalImageView, self).paintEvent(event)
@@ -149,6 +169,7 @@ class ThermalImageView(QLabel):
             # Get image rectangle
             img_rect = self._get_image_rect()
             if not img_rect:
+                painter.end()
                 return
             
             # Draw current selection (yellow crosshair)
@@ -282,177 +303,181 @@ class ThermalCalibrationPlugin(PyPlugin):
         self._node.get_logger().info("Thermal calibration plugin initialized")
         
     def _init_ui(self):
-        """Initialize the user interface."""
-        # Create main layout
-        main_layout = QHBoxLayout()
-        self._widget.setLayout(main_layout)
-        
-        # Create splitter for left and right panel
-        splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(splitter)
-        
-        # Left panel (thermal image)
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)  # Reduce margins
+            """Initialize the user interface."""
+            # Create main layout
+            main_layout = QHBoxLayout()
+            main_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins for more space
+            self._widget.setLayout(main_layout)
+            
+            # Create splitter for left and right panel
+            splitter = QSplitter(Qt.Horizontal)
+            main_layout.addWidget(splitter)
+            
+            # Left panel (thermal image)
+            left_panel = QWidget()
+            left_layout = QVBoxLayout(left_panel)
+            left_layout.setContentsMargins(0, 0, 0, 0)  # Reduce margins for more space
 
-        # Thermal image view
-        self.image_view = ThermalImageView()
-        left_layout.addWidget(self.image_view, 1)  # Give it a stretch factor of 1
-        
-        # Connect pixel_clicked signal
-        self.image_view.pixel_clicked.connect(self._on_pixel_clicked)
-        
-        # Add information labels under the image
-        img_info_layout = QHBoxLayout()
-        self.coords_label = QLabel("Coordinates: -")
-        img_info_layout.addWidget(self.coords_label)
-        
-        self.raw_value_label = QLabel("Raw value: -")
-        img_info_layout.addWidget(self.raw_value_label)
-        
-        self.temp_label = QLabel("Temperature: (calibration pending)")
-        img_info_layout.addWidget(self.temp_label)
-        
-        left_layout.addLayout(img_info_layout)
-        
-        # Right panel (controls)
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        
-        # Top section - Controls for entering reference temperatures
-        controls_group = QWidget()
-        controls_layout = QVBoxLayout(controls_group)
+            # Thermal image view
+            self.image_view = ThermalImageView()
+            left_layout.addWidget(self.image_view, 1)  # Give it a stretch factor of 1
+            
+            # Connect pixel_clicked signal
+            self.image_view.pixel_clicked.connect(self._on_pixel_clicked)
+            
+            # Add information labels under the image
+            img_info_layout = QHBoxLayout()
+            self.coords_label = QLabel("Coordinates: -")
+            img_info_layout.addWidget(self.coords_label)
+            
+            self.raw_value_label = QLabel("Raw value: -")
+            img_info_layout.addWidget(self.raw_value_label)
+            
+            self.temp_label = QLabel("Temperature: (calibration pending)")
+            img_info_layout.addWidget(self.temp_label)
+            
+            left_layout.addLayout(img_info_layout)
+            
+            # Right panel (controls)
+            right_panel = QWidget()
+            right_layout = QVBoxLayout(right_panel)
+            right_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins for more space
+            
+            # Top section - Controls for entering reference temperatures
+            controls_group = QWidget()
+            controls_layout = QVBoxLayout(controls_group)
+            controls_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins
 
-        # Colormap selection
-        colormap_layout = QHBoxLayout()
-        colormap_layout.addWidget(QLabel("Colormap:"))
-        self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems(["Grayscale", "Inferno", "Jet", "Viridis", "Rainbow"])
-        self.colormap_combo.setCurrentText("Grayscale")  # Set default to grayscale
-        self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
-        colormap_layout.addWidget(self.colormap_combo)
-        controls_layout.addLayout(colormap_layout)
-        
-        # Button to enter temperature
-        self.enter_temp_btn = QPushButton("Enter temperature value")
-        self.enter_temp_btn.setEnabled(False)
-        self.enter_temp_btn.clicked.connect(self._on_enter_temp_clicked)
-        controls_layout.addWidget(self.enter_temp_btn)
-        
-        # Temperature input layout (initially hidden)
-        self.temp_input_layout = QHBoxLayout()
-        
-        self.temp_input = QDoubleSpinBox()
-        self.temp_input.setRange(-50.0, 500.0)
-        self.temp_input.setDecimals(1)
-        self.temp_input.setSuffix(" °C")
-        self.temp_input_layout.addWidget(self.temp_input)
-        
-        self.save_temp_btn = QPushButton("Save")
-        self.save_temp_btn.clicked.connect(self._on_save_temp_clicked)
-        self.temp_input_layout.addWidget(self.save_temp_btn)
-        
-        # Simple text cancel button
-        self.cancel_temp_btn = QPushButton("Cancel")
-        self.cancel_temp_btn.clicked.connect(self._on_cancel_temp_clicked)
-        self.temp_input_layout.addWidget(self.cancel_temp_btn)
-        
-        # Initially hide temperature input controls
-        self.temp_input_widget = QWidget()
-        self.temp_input_widget.setLayout(self.temp_input_layout)
-        self.temp_input_widget.setVisible(False)
-        controls_layout.addWidget(self.temp_input_widget)
-        
-        right_layout.addWidget(controls_group)
-        
-        # Bottom section - Calibration points and controls
-        calibration_group = QWidget()
-        calibration_layout = QVBoxLayout(calibration_group)
-        
-        # Table of calibration points
-        self.points_table = QTableWidget(0, 4)
-        self.points_table.setHorizontalHeaderLabels(["ID", "Coords", "Raw Value", "Temp (°C)"])
-        self.points_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        calibration_layout.addWidget(self.points_table)
-        
-        # Calibration controls layout
-        cal_controls_layout = QHBoxLayout()
-        
-        # Model type selection
-        cal_controls_layout.addWidget(QLabel("Model:"))
-        
-        self.model_type_combo = QComboBox()
-        self.model_type_combo.addItem("Polynomial")
-        cal_controls_layout.addWidget(self.model_type_combo)
-        
-        # Degree selection (for polynomial)
-        cal_controls_layout.addWidget(QLabel("Degree:"))
-        
-        self.degree_spin = QDoubleSpinBox()
-        self.degree_spin.setRange(1, 5)
-        self.degree_spin.setDecimals(0)
-        self.degree_spin.setValue(2)
-        cal_controls_layout.addWidget(self.degree_spin)
-        
-        # Calibrate button
-        self.calibrate_btn = QPushButton("Calibrate")
-        self.calibrate_btn.clicked.connect(self._on_calibrate_clicked)
-        cal_controls_layout.addWidget(self.calibrate_btn)
-        
-        calibration_layout.addLayout(cal_controls_layout)
-        
-        # Calibration results layout
-        cal_results_layout = QVBoxLayout()
-        
-        # Results text
-        self.cal_results_label = QLabel("No calibration performed yet")
-        cal_results_layout.addWidget(self.cal_results_label)
-        
-        # Export/Clear buttons layout
-        export_clear_layout = QHBoxLayout()
-        
-        # Export button
-        self.export_btn = QPushButton("Export Calibration")
-        self.export_btn.clicked.connect(self._on_export_clicked)
-        self.export_btn.setEnabled(False)
-        export_clear_layout.addWidget(self.export_btn)
-        
-        # Clear button
-        self.clear_btn = QPushButton("Clear Data")
-        self.clear_btn.clicked.connect(self._on_clear_clicked)
-        export_clear_layout.addWidget(self.clear_btn)
-        
-        cal_results_layout.addLayout(export_clear_layout)
-        
-        # Radiometric toggle
-        self.radio_toggle = QPushButton("Enable Radiometric Mode")
-        self.radio_toggle.setCheckable(True)
-        self.radio_toggle.toggled.connect(self._on_radio_toggled)
-        self.radio_toggle.setEnabled(False)
-        cal_results_layout.addWidget(self.radio_toggle)
-        
-        calibration_layout.addLayout(cal_results_layout)
-        
-        right_layout.addWidget(calibration_group)
-        
-        # Add panels to splitter
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
+            # Colormap selection
+            colormap_layout = QHBoxLayout()
+            colormap_layout.addWidget(QLabel("Colormap:"))
+            self.colormap_combo = QComboBox()
+            self.colormap_combo.addItems(["Grayscale", "Inferno", "Jet", "Viridis", "Rainbow"])
+            self.colormap_combo.setCurrentText("Grayscale")  # Set default to grayscale
+            self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
+            colormap_layout.addWidget(self.colormap_combo)
+            controls_layout.addLayout(colormap_layout)
+            
+            # Button to enter temperature
+            self.enter_temp_btn = QPushButton("Enter temperature value")
+            self.enter_temp_btn.setEnabled(False)
+            self.enter_temp_btn.clicked.connect(self._on_enter_temp_clicked)
+            controls_layout.addWidget(self.enter_temp_btn)
+            
+            # Temperature input layout (initially hidden)
+            self.temp_input_layout = QHBoxLayout()
+            
+            self.temp_input = QDoubleSpinBox()
+            self.temp_input.setRange(-50.0, 500.0)
+            self.temp_input.setDecimals(1)
+            self.temp_input.setSuffix(" °C")
+            self.temp_input_layout.addWidget(self.temp_input)
+            
+            self.save_temp_btn = QPushButton("Save")
+            self.save_temp_btn.clicked.connect(self._on_save_temp_clicked)
+            self.temp_input_layout.addWidget(self.save_temp_btn)
+            
+            # Simple text cancel button
+            self.cancel_temp_btn = QPushButton("Cancel")
+            self.cancel_temp_btn.clicked.connect(self._on_cancel_temp_clicked)
+            self.temp_input_layout.addWidget(self.cancel_temp_btn)
+            
+            # Initially hide temperature input controls
+            self.temp_input_widget = QWidget()
+            self.temp_input_widget.setLayout(self.temp_input_layout)
+            self.temp_input_widget.setVisible(False)
+            controls_layout.addWidget(self.temp_input_widget)
+            
+            right_layout.addWidget(controls_group)
+            
+            # Bottom section - Calibration points and controls
+            calibration_group = QWidget()
+            calibration_layout = QVBoxLayout(calibration_group)
+            calibration_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins
+            
+            # Table of calibration points
+            self.points_table = QTableWidget(0, 4)
+            self.points_table.setHorizontalHeaderLabels(["ID", "Coords", "Raw Value", "Temp (°C)"])
+            self.points_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            calibration_layout.addWidget(self.points_table)
+            
+            # Calibration controls layout
+            cal_controls_layout = QHBoxLayout()
+            
+            # Model type selection
+            cal_controls_layout.addWidget(QLabel("Model:"))
+            
+            self.model_type_combo = QComboBox()
+            self.model_type_combo.addItem("Polynomial")
+            cal_controls_layout.addWidget(self.model_type_combo)
+            
+            # Degree selection (for polynomial)
+            cal_controls_layout.addWidget(QLabel("Degree:"))
+            
+            self.degree_spin = QDoubleSpinBox()
+            self.degree_spin.setRange(1, 5)
+            self.degree_spin.setDecimals(0)
+            self.degree_spin.setValue(2)
+            cal_controls_layout.addWidget(self.degree_spin)
+            
+            # Calibrate button
+            self.calibrate_btn = QPushButton("Calibrate")
+            self.calibrate_btn.clicked.connect(self._on_calibrate_clicked)
+            cal_controls_layout.addWidget(self.calibrate_btn)
+            
+            # Add button to remove last calibration point
+            self.remove_last_btn = QPushButton("Remove Last Point")
+            self.remove_last_btn.setEnabled(False)
+            self.remove_last_btn.clicked.connect(self._on_remove_last_clicked)
+            cal_controls_layout.addWidget(self.remove_last_btn)
+            
+            calibration_layout.addLayout(cal_controls_layout)
+            
+            # Calibration results layout
+            cal_results_layout = QVBoxLayout()
+            
+            # Results text
+            self.cal_results_label = QLabel("No calibration performed yet")
+            cal_results_layout.addWidget(self.cal_results_label)
+            
+            # Export/Clear buttons layout
+            export_clear_layout = QHBoxLayout()
+            
+            # Export button
+            self.export_btn = QPushButton("Export Calibration")
+            self.export_btn.clicked.connect(self._on_export_clicked)
+            self.export_btn.setEnabled(False)
+            export_clear_layout.addWidget(self.export_btn)
+            
+            # Clear button
+            self.clear_btn = QPushButton("Clear Data")
+            self.clear_btn.clicked.connect(self._on_clear_clicked)
+            export_clear_layout.addWidget(self.clear_btn)
+            
+            cal_results_layout.addLayout(export_clear_layout)
+            
+            # Radiometric toggle
+            self.radio_toggle = QPushButton("Enable Radiometric Mode")
+            self.radio_toggle.setCheckable(True)
+            self.radio_toggle.toggled.connect(self._on_radio_toggled)
+            self.radio_toggle.setEnabled(False)
+            cal_results_layout.addWidget(self.radio_toggle)
+            
+            calibration_layout.addLayout(cal_results_layout)
+            
+            right_layout.addWidget(calibration_group)
+            
+            # Add panels to splitter
+            splitter.addWidget(left_panel)
+            splitter.addWidget(right_panel)
 
-        # Set initial splitter sizes (70% left, 30% right)
-        splitter.setSizes([700, 300])  # Change from [400, 600] to give more space to the image
-        
-        # Create timer for regular UI updates
-        self.update_timer = QTimer(self._widget)
-        self.update_timer.timeout.connect(self._update_ui)
-        self.update_timer.start(100)  # Update every 100ms
-
-        # Add button to remove last calibration point (for mistake correction)
-        self.remove_last_btn = QPushButton("Remove Last Point")
-        self.remove_last_btn.setEnabled(False)
-        self.remove_last_btn.clicked.connect(self._on_remove_last_clicked)
-        cal_controls_layout.addWidget(self.remove_last_btn)
+            # Set initial splitter sizes (80% left, 20% right) to give more space to the image
+            splitter.setSizes([800, 200])
+            
+            # Create timer for regular UI updates
+            self.update_timer = QTimer(self._widget)
+            self.update_timer.timeout.connect(self._update_ui)
+            self.update_timer.start(100)  # Update every 100ms
         
     def _setup_ros_communication(self):
         """Set up ROS subscribers and service clients."""
@@ -492,23 +517,45 @@ class ThermalCalibrationPlugin(PyPlugin):
 
     @Slot(object)
     def _update_image_display_from_signal(self, img_data):
-        """Update image display from the main thread."""
-        if not self._widget.isVisible():
+            """Update image display from the main thread."""
+            if not self._widget.isVisible():
+                return
+                
+            try:
+                with QMutexLocker(self.image_mutex):
+                    if isinstance(img_data, np.ndarray):
+                        if len(img_data.shape) == 2:  # If it's a grayscale image
+                            self._update_image_display(img_data)
+                        elif len(img_data.shape) == 3:  # If it's already a colored image
+                            # Just update directly
+                            h, w, c = img_data.shape
+                            q_img = QImage(img_data.data, w, h, w * c, QImage.Format_RGB888).rgbSwapped()
+                            pixmap = QPixmap.fromImage(q_img)
+                            
+                            # Scale pixmap to fit the label while maintaining aspect ratio
+                            self._set_scaled_pixmap(pixmap)
+            except Exception as e:
+                self._node.get_logger().error(f'Error updating image from signal: {e}')
+
+    def _set_scaled_pixmap(self, pixmap):
+        """Set a scaled pixmap that better fills the available space."""
+        if pixmap.isNull():
             return
             
-        try:
-            with QMutexLocker(self.image_mutex):
-                if isinstance(img_data, np.ndarray):
-                    if len(img_data.shape) == 2:  # If it's a grayscale image
-                        self._update_image_display(img_data)
-                    elif len(img_data.shape) == 3:  # If it's already a colored image
-                        # Just update directly
-                        h, w, c = img_data.shape
-                        q_img = QImage(img_data.data, w, h, w * c, QImage.Format_RGB888).rgbSwapped()
-                        pixmap = QPixmap.fromImage(q_img)
-                        self.image_view.setPixmap(pixmap)
-        except Exception as e:
-            self._node.get_logger().error(f'Error updating image from signal: {e}')
+        # Get the available size in the image view
+        view_size = self.image_view.size()
+        
+        # Scale up the image to better fill the space
+        # We'll scale it to 90% of the view size to leave a small margin
+        scaled_pixmap = pixmap.scaled(
+            int(view_size.width() * 0.9), 
+            int(view_size.height() * 0.9),
+            Qt.KeepAspectRatio, 
+            Qt.SmoothTransformation
+        )
+        
+        # Set the scaled pixmap
+        self.image_view.setPixmap(scaled_pixmap)
 
     @Slot(str)
     def _update_raw_value_label(self, text):
@@ -637,8 +684,8 @@ class ThermalCalibrationPlugin(PyPlugin):
             q_img = QImage(colored_img.data, w, h, w * c, QImage.Format_RGB888).rgbSwapped()
             pixmap = QPixmap.fromImage(q_img)
             
-            # Update image view
-            self.image_view.setPixmap(pixmap)
+            # Update image view with scaled pixmap
+            self._set_scaled_pixmap(pixmap)
         
         except Exception as e:
             self._node.get_logger().error(f'Error updating image display: {e}')

@@ -179,9 +179,33 @@ else
     log_info "Using existing container $CONTAINER_NAME."
 fi
 
-# Find correct workspace path inside container
+# Important: Verify the correct workspace path inside the container
+# This is a critical step that ensures we're using the right paths
+log_info "Verifying workspace path inside container..."
+
+# Get the container's AIRLAB_PATH
 CONTAINER_AIRLAB_PATH=$(docker exec $CONTAINER_NAME bash -c "echo \${AIRLAB_PATH}")
-CONTAINER_WORKSPACE_DIR="${CONTAINER_AIRLAB_PATH}/$(basename ${WORKSPACE_DIR})"
+log_info "Container AIRLAB_PATH: ${CONTAINER_AIRLAB_PATH}"
+
+# Determine the workspace directory inside the container
+# First check if the workspace is directly mounted (better approach)
+CONTAINER_WORKSPACE_DIR=""
+if docker exec $CONTAINER_NAME bash -c "[ -d ${WORKSPACE_DIR} ]"; then
+    CONTAINER_WORKSPACE_DIR="${WORKSPACE_DIR}"
+    log_info "Workspace directory is directly mounted at: ${CONTAINER_WORKSPACE_DIR}"
+else
+    # Fall back to using AIRLAB_PATH
+    CONTAINER_WORKSPACE_DIR="${CONTAINER_AIRLAB_PATH}/$(basename ${WORKSPACE_DIR})"
+    log_info "Workspace directory inside container: ${CONTAINER_WORKSPACE_DIR}"
+fi
+
+# Verify the workspace directory actually exists in the container
+if ! docker exec $CONTAINER_NAME bash -c "[ -d ${CONTAINER_WORKSPACE_DIR} ]"; then
+    log_error "Workspace directory not found in container: ${CONTAINER_WORKSPACE_DIR}"
+    log_info "Available directories in AIRLAB_PATH:"
+    docker exec $CONTAINER_NAME bash -c "ls -la ${CONTAINER_AIRLAB_PATH}"
+    exit 1
+fi
 
 # Determine paths inside the container
 CONTAINER_TOOL_DIR="${CONTAINER_WORKSPACE_DIR}/src/thermal_calibration_tool"
@@ -189,6 +213,14 @@ CONTAINER_DATA_DIR="${CONTAINER_TOOL_DIR}/data"
 
 log_info "Container workspace directory: ${CONTAINER_WORKSPACE_DIR}"
 log_info "Container tool directory: ${CONTAINER_TOOL_DIR}"
+
+# Verify install directory exists (critical for sourcing setup.bash)
+if ! docker exec $CONTAINER_NAME bash -c "[ -d ${CONTAINER_WORKSPACE_DIR}/install ]"; then
+    log_error "Install directory not found: ${CONTAINER_WORKSPACE_DIR}/install"
+    log_info "Workspace contents:"
+    docker exec $CONTAINER_NAME bash -c "ls -la ${CONTAINER_WORKSPACE_DIR}"
+    exit 1
+fi
 
 # Check if params file exists
 if [ ! -f "${PARAMS_FILE}" ]; then
@@ -215,14 +247,15 @@ docker exec -u 0 $CONTAINER_NAME bash -c "apt-get update && apt-get install -y \
     ros-humble-rqt \
     ros-humble-rqt-gui \
     ros-humble-rqt-gui-py \
-    ros-humble-qt-gui"
+    ros-humble-qt-gui \
+    python3-pip"
 
 # Install numpy 1.24.2 if not already installed
 docker exec $CONTAINER_NAME bash -c "pip3 list | grep -q 'numpy.*1.24.2' || pip3 install numpy==1.24.2"
 
 # Install additional Python packages needed for the thermal calibration tool
 log_info "Installing required Python packages..."
-docker exec $CONTAINER_NAME bash -c "pip3 install matplotlib scipy"
+docker exec $CONTAINER_NAME bash -c "pip3 install matplotlib scipy pyyaml"
 
 # Fix packaging and setuptools to handle common build errors
 log_info "Setting up Python package environment to prevent common build errors..."
@@ -254,48 +287,63 @@ fi
 # Ensure workspace directory exists
 docker exec $CONTAINER_NAME bash -c "mkdir -p ${CONTAINER_WORKSPACE_DIR}/src"
 
-# Simplified workspace setup for thermal calibration
-log_info "Setting up workspace for thermal calibration..."
+# Verify that the required ROS packages exist in the workspace
+log_info "Verifying ROS packages in the workspace..."
+docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && \
+  if [ -f ${CONTAINER_WORKSPACE_DIR}/install/setup.bash ]; then \
+    . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && \
+    ros2 pkg list | grep -q 'usb_cam' && ros2 pkg list | grep -q 'mono16_converter' && \
+    ros2 pkg list | grep -q 'thermal_calibration_interfaces' && ros2 pkg list | grep -q 'thermal_calibration_rqt' && \
+    echo 'All required packages found'; \
+  else \
+    echo 'Workspace setup.bash not found'; \
+    exit 1; \
+  fi" || { log_error "Required ROS packages not found in workspace"; exit 1; }
 
-# Always source ROS humble first
-ROS_BASE_CMD=". /opt/ros/humble/setup.bash"
-
-# Only build the thermal calibration packages if needed
-if [ "$BUILD_PACKAGES" = true ] && ! docker exec $CONTAINER_NAME bash -c "[ -f ${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/package.xml ]"; then
+# Only build the thermal calibration packages if needed and if build flag is set
+if [ "$BUILD_PACKAGES" = true ]; then
     log_info "Building thermal calibration packages..."
-    docker exec $CONTAINER_NAME bash -c "cd ${CONTAINER_WORKSPACE_DIR} && ${ROS_BASE_CMD} && colcon build --symlink-install --packages-select thermal_calibration_interfaces thermal_calibration_rqt"
     
-    # Verify the build was successful
-    if ! docker exec $CONTAINER_NAME bash -c "[ -f ${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/package.xml ]"; then
-        log_warning "Build may have failed. Continuing anyway but services might not be available."
+    # Define build command
+    BUILD_CMD=". /opt/ros/humble/setup.bash && cd ${CONTAINER_WORKSPACE_DIR} && \
+      colcon build --symlink-install --packages-select thermal_calibration_interfaces thermal_calibration_rqt"
+    
+    # Execute build command
+    docker exec $CONTAINER_NAME bash -c "$BUILD_CMD"
+    
+    # Check if build was successful
+    if [ $? -ne 0 ]; then
+        log_error "Build failed. Check previous output for details."
+        exit 1
     else
         log_success "Thermal calibration packages built successfully."
     fi
 else
-    log_info "Thermal calibration packages are already built, skipping build step."
+    log_info "Skipping build step as requested."
 fi
-
-# Definitive ROS source command - always source workspace regardless of build status
-WORKSPACE_SETUP_CMD=". ${CONTAINER_WORKSPACE_DIR}/install/setup.bash"
-ROS_SOURCE_CMD="${ROS_BASE_CMD} && ${WORKSPACE_SETUP_CMD}"
-
-log_info "Using ROS environment with command: ${ROS_SOURCE_CMD}"
 
 # Create the tmux session for running multiple commands
 log_info "Setting up tmux session for thermal calibration..."
-docker exec $CONTAINER_NAME bash -c "tmux new-session -d -s thermal_calibration || true"
+
+# Check if session already exists, if yes, kill it
+docker exec $CONTAINER_NAME bash -c "tmux has-session -t thermal_calibration 2>/dev/null && tmux kill-session -t thermal_calibration" || true
+docker exec $CONTAINER_NAME bash -c "tmux new-session -d -s thermal_calibration" || { log_error "Failed to create tmux session"; exit 1; }
+
+# Prepare ROS source command (important: source workspace setup.bash)
+ROS_SOURCE_CMD=". /opt/ros/humble/setup.bash && . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash"
 
 # Start usb_cam node if not skipped
 if [ "$SKIP_CAM" = false ]; then
     log_info "Starting usb_cam node..."
-    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:0 '${ROS_SOURCE_CMD} && ros2 run usb_cam usb_cam_node_exe --ros-args --params-file ${CONTAINER_PARAMS_FILE} || echo \"Failed to start usb_cam node. Check if the package is installed.\"' C-m"
+    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:0 '${ROS_SOURCE_CMD} && ros2 run usb_cam usb_cam_node_exe --ros-args --params-file ${CONTAINER_PARAMS_FILE}' C-m"
     
     # Wait for usb_cam to start
     sleep 5
     
     # Check if usb_cam node is running
     if ! docker exec $CONTAINER_NAME bash -c "${ROS_SOURCE_CMD} && ros2 node list 2>/dev/null | grep -q '/usb_cam'"; then
-        log_warning "usb_cam node may not have started properly. Continuing anyway..."
+        log_warning "usb_cam node not found in node list. It may not have started properly."
+        docker exec $CONTAINER_NAME bash -c "tmux capture-pane -pt thermal_calibration:0" | tail -20
     else
         log_success "usb_cam node is running."
     fi
@@ -306,19 +354,35 @@ fi
 # Start mono16_converter
 log_info "Starting mono16_converter node..."
 docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:1 -n mono16_converter"
-docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:1 '${ROS_SOURCE_CMD} && ros2 run mono16_converter mono16_converter || echo \"Failed to start mono16_converter. Check if the package is installed.\"' C-m"
+docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:1 '${ROS_SOURCE_CMD} && ros2 run mono16_converter mono16_converter' C-m"
 
 # Wait for mono16_converter to start
 sleep 3
+
+# Check if mono16_converter node is running
+if ! docker exec $CONTAINER_NAME bash -c "${ROS_SOURCE_CMD} && ros2 node list 2>/dev/null | grep -q 'mono16_converter'"; then
+    log_warning "mono16_converter node not found in node list. It may not have started properly."
+    docker exec $CONTAINER_NAME bash -c "tmux capture-pane -pt thermal_calibration:1" | tail -20
+else
+    log_success "mono16_converter node is running."
+fi
 
 # Start thermal calibration
 log_info "Starting thermal calibration system..."
 
 if [ "$USE_LAUNCH" = true ]; then
-    # Start using launch file
-    docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:2 -n thermal_calibration"
-    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} && ros2 launch thermal_calibration_rqt thermal_calibration.launch.py' C-m"
-else
+    # Check if launch file exists before attempting to use it
+    if docker exec $CONTAINER_NAME bash -c "[ -f ${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/launch/thermal_calibration.launch.py ]"; then
+        # Start using launch file
+        docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:2 -n thermal_calibration"
+        docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} && ros2 launch thermal_calibration_rqt thermal_calibration.launch.py' C-m"
+    else
+        log_error "Launch file not found. Falling back to manual mode."
+        USE_LAUNCH=false
+    fi
+fi
+
+if [ "$USE_LAUNCH" = false ]; then
     # Start thermal calibration node
     docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:2 -n calibration_node"
     docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} && ros2 run thermal_calibration_rqt thermal_calibration_node' C-m"
@@ -327,16 +391,22 @@ else
     docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:3 -n rqt"
     
     # Check if thermal_calibration_rqt is installed
-    if docker exec $CONTAINER_NAME bash -c "[ -d ${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt ]"; then
+    if docker exec $CONTAINER_NAME bash -c "ros2 pkg list 2>/dev/null | grep -q 'thermal_calibration_rqt'"; then
         log_info "Starting thermal calibration rqt plugin..."
-        PERSPECTIVE_PATH="${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/resource/thermal_calibration.perspective"
-        # Check if perspective file exists
         docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} && rqt --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin' C-m"
     else
-        log_info "Starting standard rqt (thermal calibration plugin not installed)..."
-        docker exec -it $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} && rqt' C-m"
+        log_warning "thermal_calibration_rqt package not found. Starting standard rqt..."
+        docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} && rqt' C-m"
     fi
 fi
+
+# Wait for all nodes to start
+log_info "Waiting for all nodes to start..."
+sleep 5
+
+# Display node list for verification
+log_info "Currently running ROS nodes:"
+docker exec $CONTAINER_NAME bash -c "${ROS_SOURCE_CMD} && ros2 node list"
 
 # Attach to the tmux session
 log_info "Attaching to tmux session..."

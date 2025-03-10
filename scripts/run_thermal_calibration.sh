@@ -423,8 +423,11 @@ log_info "Starting thermal calibration system..."
 
 # Start thermal calibration node
 docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:2 -n calibration_node"
-docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} && ros2 run thermal_calibration_rqt thermal_calibration_node' C-m"
+# Find the executable path
+EXEC_PATH=$(docker exec $CONTAINER_NAME bash -c "find ${CONTAINER_WORKSPACE_DIR}/install -name thermal_calibration_node")
 
+# Then update the tmux command line that starts the node
+docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:2 '${ROS_SOURCE_CMD} && ${EXEC_PATH}' C-m"
 # Wait for calibration node to start
 sleep 3
 
@@ -443,7 +446,7 @@ docker exec $CONTAINER_NAME bash -c "tmux new-window -t thermal_calibration:3 -n
 # Check if thermal_calibration_rqt is installed
 if docker exec $CONTAINER_NAME bash -c "${ROS_SOURCE_CMD} && ros2 pkg list 2>/dev/null | grep -q 'thermal_calibration_rqt'"; then
     log_info "Starting thermal calibration rqt plugin..."
-    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} && rqt --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin' C-m"
+    docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} && rqt --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin --force-discover' C-m"
 else
     log_warning "thermal_calibration_rqt package not found. Starting standard rqt..."
     docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} && rqt' C-m"

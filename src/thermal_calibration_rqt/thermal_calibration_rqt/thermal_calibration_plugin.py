@@ -33,13 +33,32 @@ class ThermalImageView(QLabel):
     def __init__(self, parent=None):
         super(ThermalImageView, self).__init__(parent)
         self.selected_point = None
+        self.calibration_points = []  # List to store saved calibration points
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(640, 480)  # Increase minimum size
+        self.setMinimumSize(640, 480)
         self.setCursor(Qt.CrossCursor)
         
         # Set better size policy to maximize use of available space
         from python_qt_binding.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+    def add_calibration_point(self, x, y, temp):
+        """Add a point to the calibration points list."""
+        self.calibration_points.append((x, y, temp))
+        self.update()  # Trigger repaint
+        
+    def remove_calibration_point(self, index):
+        """Remove a point from the calibration points list."""
+        if 0 <= index < len(self.calibration_points):
+            del self.calibration_points[index]
+            self.update()  # Trigger repaint
+            return True
+        return False
+    
+    def clear_calibration_points(self):
+        """Clear all calibration points."""
+        self.calibration_points = []
+        self.update()  # Trigger repaint
         
     def mousePressEvent(self, event):
         """Handle mouse press events to select a pixel."""
@@ -95,10 +114,10 @@ class ThermalImageView(QLabel):
         return QRect(int(x), int(y), scaledSize.width(), scaledSize.height())
     
     def paintEvent(self, event):
-        """Override paint event to draw selection marker."""
+        """Override paint event to draw selection marker and calibration points."""
         super(ThermalImageView, self).paintEvent(event)
         
-        if self.selected_point and self.pixmap() and not self.pixmap().isNull():
+        if self.pixmap() and not self.pixmap().isNull():
             from python_qt_binding.QtGui import QPainter
             painter = QPainter(self)
             
@@ -106,24 +125,38 @@ class ThermalImageView(QLabel):
             img_rect = self._get_image_rect()
             if not img_rect:
                 return
+            
+            # Draw current selection (yellow crosshair)
+            if self.selected_point:
+                img_x, img_y = self.selected_point
+                norm_x = img_x / self.pixmap().width()
+                norm_y = img_y / self.pixmap().height()
                 
-            # Map image coordinates to widget coordinates
-            img_x, img_y = self.selected_point
-            norm_x = img_x / self.pixmap().width()
-            norm_y = img_y / self.pixmap().height()
+                widget_x = img_rect.left() + norm_x * img_rect.width()
+                widget_y = img_rect.top() + norm_y * img_rect.height()
+                
+                # Draw crosshair
+                painter.setPen(QPen(QColor(255, 255, 0), 2))
+                radius = 10
+                painter.drawLine(int(widget_x - radius), int(widget_y), int(widget_x + radius), int(widget_y))
+                painter.drawLine(int(widget_x), int(widget_y - radius), int(widget_x), int(widget_y + radius))
+                
+                # Draw circle
+                painter.setPen(QPen(QColor(255, 255, 0), 1))
+                painter.drawEllipse(int(widget_x - radius), int(widget_y - radius), radius * 2, radius * 2)
             
-            widget_x = img_rect.left() + norm_x * img_rect.width()
-            widget_y = img_rect.top() + norm_y * img_rect.height()
-            
-            # Draw crosshair
-            painter.setPen(QPen(QColor(255, 255, 0), 2))
-            radius = 10
-            painter.drawLine(int(widget_x - radius), int(widget_y), int(widget_x + radius), int(widget_y))
-            painter.drawLine(int(widget_x), int(widget_y - radius), int(widget_x), int(widget_y + radius))
-            
-            # Draw circle
-            painter.setPen(QPen(QColor(255, 255, 0), 1))
-            painter.drawEllipse(int(widget_x - radius), int(widget_y - radius), radius * 2, radius * 2)
+            # Draw saved calibration points (green squares)
+            painter.setPen(QPen(QColor(0, 255, 0), 2))
+            for x, y, temp in self.calibration_points:
+                norm_x = x / self.pixmap().width()
+                norm_y = y / self.pixmap().height()
+                
+                widget_x = img_rect.left() + norm_x * img_rect.width()
+                widget_y = img_rect.top() + norm_y * img_rect.height()
+                
+                # Draw square
+                size = 8
+                painter.drawRect(int(widget_x - size), int(widget_y - size), size * 2, size * 2)
 
 
 class ThermalCalibrationPlugin(PyPlugin):
@@ -209,7 +242,7 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.raw_value_label = QLabel("Raw value: -")
         img_info_layout.addWidget(self.raw_value_label)
         
-        self.temp_label = QLabel("Temperature: -")
+        self.temp_label = QLabel("Temperature: (calibration pending)")
         img_info_layout.addWidget(self.temp_label)
         
         left_layout.addLayout(img_info_layout)
@@ -245,13 +278,17 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.temp_input.setRange(-50.0, 500.0)
         self.temp_input.setDecimals(1)
         self.temp_input.setSuffix(" °C")
+        self.temp_input.setKeyboardTracking(True)  # Update value immediately on typing
         self.temp_input_layout.addWidget(self.temp_input)
         
         self.save_temp_btn = QPushButton("Save")
         self.save_temp_btn.clicked.connect(self._on_save_temp_clicked)
         self.temp_input_layout.addWidget(self.save_temp_btn)
         
-        self.cancel_temp_btn = QPushButton("Cancel")
+        # Cancel button with reload icon
+        self.cancel_temp_btn = QPushButton()
+        self.cancel_temp_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.cancel_temp_btn.setToolTip("Cancel")
         self.cancel_temp_btn.clicked.connect(self._on_cancel_temp_clicked)
         self.temp_input_layout.addWidget(self.cancel_temp_btn)
         
@@ -344,6 +381,12 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.update_timer = QTimer(self._widget)
         self.update_timer.timeout.connect(self._update_ui)
         self.update_timer.start(100)  # Update every 100ms
+
+        # Add button to remove last calibration point (for mistake correction)
+        self.remove_last_btn = QPushButton("Remove Last Point")
+        self.remove_last_btn.setEnabled(False)
+        self.remove_last_btn.clicked.connect(self._on_remove_last_clicked)
+        cal_controls_layout.addWidget(self.remove_last_btn)
         
     def _setup_ros_communication(self):
         """Set up ROS subscribers and service clients."""
@@ -391,13 +434,24 @@ class ThermalCalibrationPlugin(PyPlugin):
             if not hasattr(self, 'has_8bit_stream') or not self.has_8bit_stream:
                 self._update_display_from_16bit()
             
-            # If radiometric mode is on and we have a model, update temperature at selected point
-            if self.radiometric_mode and self.calibration_model and self.selected_coords:
+            # If we have selected coordinates, update the raw value
+            if hasattr(self, 'selected_coords') and self.selected_coords:
                 x, y = self.selected_coords
                 if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                    raw_value = int(self.current_image[y, x])
-                    self._update_temperature_display(raw_value)
-        
+                    # Update raw value from current frame
+                    current_raw = int(self.current_image[y, x])
+                    
+                    # Only update display if value changed significantly (to reduce flicker)
+                    if not hasattr(self, 'current_raw_value') or abs(current_raw - self.current_raw_value) > 2:
+                        self.current_raw_value = current_raw
+                        self.raw_value_label.setText(f"Raw value: {current_raw}")
+                        
+                        # Update temperature if in radiometric mode
+                        if self.radiometric_mode and self.calibration_model:
+                            self._update_temperature_display(current_raw)
+                        elif not self.calibration_model:
+                            self.temp_label.setText("Temperature: (calibration pending)")
+            
         except Exception as e:
             self._node.get_logger().error(f'Error processing 16-bit image: {e}')
     
@@ -482,40 +536,38 @@ class ThermalCalibrationPlugin(PyPlugin):
     
     def _on_pixel_clicked(self, x, y):
         """Handle pixel selection in the image."""
-        if self.current_image is None:
-            self._node.get_logger().warn('No thermal image available')
-            return
-            
-        try:
+        self._node.get_logger().info(f'Pixel clicked at ({x}, {y})')
+        
+        # Only process the click if we're not currently in temperature input mode
+        if not self.temp_input_widget.isVisible():
+            # Store coordinates
             self.selected_coords = (x, y)
-            
-            # Update coordinate display
             self.coords_label.setText(f"Coordinates: ({x}, {y})")
             
-            # Debug output
-            self._node.get_logger().info(f'Click at coordinates ({x}, {y})')
-            self._node.get_logger().info(f'Image shape: {self.current_image.shape}')
+            # Enable the button to enter temperature
+            self.enter_temp_btn.setEnabled(True)
             
-            # Get raw value from the image
-            if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                raw_value = int(self.current_image[y, x])
-                self.current_raw_value = raw_value
-                self.raw_value_label.setText(f"Raw value: {raw_value}")
-                
-                # Force enable the button to enter temperature
-                self.enter_temp_btn.setEnabled(True)
-                self._node.get_logger().info(f'Enter temp button enabled: {self.enter_temp_btn.isEnabled()}')
-                
-                # If in radiometric mode, update temperature display
-                if self.radiometric_mode and self.calibration_model:
-                    self._update_temperature_display(raw_value)
-                else:
-                    self.temp_label.setText("Temperature: -")
+            # Get raw value if an image is available
+            if self.current_image is not None:
+                try:
+                    h, w = self.current_image.shape
+                    if 0 <= y < h and 0 <= x < w:
+                        self.current_raw_value = int(self.current_image[y, x])
+                        self.raw_value_label.setText(f"Raw value: {self.current_raw_value}")
+                        
+                        # Update temperature display if in radiometric mode
+                        if self.radiometric_mode and self.calibration_model:
+                            self._update_temperature_display(self.current_raw_value)
+                        elif not self.calibration_model:
+                            self.temp_label.setText("Temperature: (calibration pending)")
+                        else:
+                            self.temp_label.setText("Temperature: (enable radiometric mode)")
+                    else:
+                        self.raw_value_label.setText("Raw value: Out of bounds")
+                except Exception as e:
+                    self._node.get_logger().error(f'Error processing pixel click: {str(e)}')
             else:
-                self._node.get_logger().warn(f'Coordinates ({x}, {y}) out of bounds. Image shape: {self.current_image.shape}')
-        
-        except Exception as e:
-            self._node.get_logger().error(f'Error handling pixel click: {e}')
+                self._node.get_logger().warn("No image available")
     
     def _update_temperature_display(self, raw_value):
         """Update the temperature display for a given raw value using the current calibration model."""
@@ -523,10 +575,42 @@ class ThermalCalibrationPlugin(PyPlugin):
     
     def _on_enter_temp_clicked(self):
         """Handle click on enter temperature button."""
-        # Show temperature input controls
-        self.temp_input_widget.setVisible(True)
-        self.enter_temp_btn.setEnabled(False)
-    
+        if not self.temp_input_widget.isVisible():
+            # Switching to temperature input mode
+            self.temp_input_widget.setVisible(True)
+            self.enter_temp_btn.setText("Save temperature value")
+            
+            # Set focus to the temperature input
+            self.temp_input.setFocus()
+        else:
+            # User clicked "Save temperature value" - save the value
+            self._save_temperature_value()
+
+    def _save_temperature_value(self):
+        """Save the entered temperature value with the current pixel."""
+        if self.selected_coords is None:
+            QMessageBox.warning(self._widget, "No Selection", 
+                            "Please select a point on the image first.")
+            return
+            
+        # Get reference temperature from input
+        reference_temp = self.temp_input.value()
+        
+        # Add calibration point
+        x, y = self.selected_coords
+        self._call_add_calibration_point(x, y, self.current_raw_value, reference_temp)
+        
+        # Add point to image view
+        self.image_view.add_calibration_point(x, y, reference_temp)
+        
+        # Reset UI state
+        self.temp_input_widget.setVisible(False)
+        self.enter_temp_btn.setText("Enter temperature value")
+        self.enter_temp_btn.setEnabled(False)  # Disable until new pixel is selected
+        
+        # Enable remove last button
+        self.remove_last_btn.setEnabled(True)
+
     def _on_save_temp_clicked(self):
         """Handle click on save temperature button."""
         if self.selected_coords is None:
@@ -547,10 +631,52 @@ class ThermalCalibrationPlugin(PyPlugin):
     
     def _on_cancel_temp_clicked(self):
         """Handle click on cancel temperature button."""
-        # Hide temperature input controls
+        # Hide temperature input and reset button text
         self.temp_input_widget.setVisible(False)
-        self.enter_temp_btn.setEnabled(True)
-    
+        self.enter_temp_btn.setText("Enter temperature value")
+        # Don't disable the button, so user can immediately try again
+
+    def _on_remove_last_clicked(self):
+        """Handle click on remove last point button."""
+        if not self.calibration_points:
+            return
+        
+        # Get the last point
+        last_point = self.calibration_points[-1]
+        
+        # Ask for confirmation
+        reply = QMessageBox.question(
+            self._widget, "Remove Point", 
+            f"Remove calibration point at ({last_point['x']}, {last_point['y']}) with temperature {last_point['reference_temp']}°C?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Remove from our local list
+            self.calibration_points.pop()
+            
+            # Remove from image view
+            if self.image_view.calibration_points:
+                self.image_view.remove_calibration_point(len(self.image_view.calibration_points) - 1)
+            
+            # Update UI
+            self._update_points_table()
+            
+            # Call service to remove point (if implemented)
+            # For now, we'll just clear all and re-add the remaining points
+            self._call_clear_calibration_data()
+            
+            # Re-add all remaining points
+            for point in self.calibration_points:
+                self._call_add_calibration_point(
+                    point['x'], point['y'], point['raw_value'], point['reference_temp']
+                )
+            
+            # Disable remove button if no more points
+            if not self.calibration_points:
+                self.remove_last_btn.setEnabled(False)
+
     def _on_calibrate_clicked(self):
         """Handle click on calibrate button."""
         if len(self.calibration_points) < 2:
@@ -599,9 +725,17 @@ class ThermalCalibrationPlugin(PyPlugin):
         # Update button text
         if checked:
             self.radio_toggle.setText("Disable Radiometric Mode")
+            # If we have a selected point and a model, update the temperature
+            if hasattr(self, 'selected_coords') and self.selected_coords and self.calibration_model:
+                if hasattr(self, 'current_raw_value'):
+                    self._update_temperature_display(self.current_raw_value)
         else:
             self.radio_toggle.setText("Enable Radiometric Mode")
-            self.temp_label.setText("Temperature: -")
+            # Update temperature label to show it's disabled
+            if self.calibration_model:
+                self.temp_label.setText("Temperature: (enable radiometric mode)")
+            else:
+                self.temp_label.setText("Temperature: (calibration pending)")
     
     def _update_ui(self):
         """Periodically update UI elements."""
@@ -642,18 +776,23 @@ class ThermalCalibrationPlugin(PyPlugin):
             rmse = self.calibration_model['rmse']
             
             result_text = (f"Calibration Model: {model_type.title()}\n"
-                          f"R²: {r_squared:.4f}\n"
-                          f"RMSE: {rmse:.2f}°C")
+                        f"R²: {r_squared:.4f}\n"
+                        f"RMSE: {rmse:.2f}°C")
             
             self.cal_results_label.setText(result_text)
             
             # Enable export and radiometric mode buttons
             self.export_btn.setEnabled(True)
             self.radio_toggle.setEnabled(True)
+            
+            # Update temperature label format now that calibration is available
+            if not self.radiometric_mode:
+                self.temp_label.setText("Temperature: (enable radiometric mode)")
         else:
             self.cal_results_label.setText("No calibration performed yet")
             self.export_btn.setEnabled(False)
             self.radio_toggle.setEnabled(False)
+            self.temp_label.setText("Temperature: (calibration pending)")
 
     def _on_colormap_changed(self, colormap_name):
         """Handle change in colormap selection."""
@@ -787,6 +926,9 @@ class ThermalCalibrationPlugin(PyPlugin):
                 self.calibration_points = []
                 self.calibration_model = None
                 
+                # Clear image view points
+                self.image_view.clear_calibration_points()
+                
                 # Update UI
                 self._update_points_table()
                 self._update_calibration_results()
@@ -794,6 +936,9 @@ class ThermalCalibrationPlugin(PyPlugin):
                 # Disable radiometric mode if it's enabled
                 if self.radiometric_mode:
                     self.radio_toggle.setChecked(False)
+                
+                # Disable remove last button
+                self.remove_last_btn.setEnabled(False)
                 
                 QMessageBox.information(self._widget, "Success", response.message)
             else:

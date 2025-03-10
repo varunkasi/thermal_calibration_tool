@@ -404,14 +404,14 @@ else
         PERSPECTIVE_PATH="${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_rqt/share/thermal_calibration_rqt/resource/thermal_calibration.perspective"
         # Check if perspective file exists
         if docker exec $CONTAINER_NAME bash -c "[ -f ${PERSPECTIVE_PATH} ]"; then
-            docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} rqt --force-discover --perspective-file ${PERSPECTIVE_PATH} --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin' C-m"
+            docker exec -it $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} rqt --force-discover --perspective-file ${PERSPECTIVE_PATH} --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin' C-m"
         else
             log_warning "Perspective file not found. Starting rqt with standalone plugin."
-            docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} rqt --force-discover --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin' C-m"
+            docker exec -it $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} rqt --force-discover --standalone thermal_calibration_rqt.thermal_calibration_plugin.ThermalCalibrationPlugin' C-m"
         fi
     else
         log_info "Starting standard rqt (thermal calibration plugin not installed)..."
-        docker exec $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} rqt' C-m"
+        docker exec -it $CONTAINER_NAME bash -c "tmux send-keys -t thermal_calibration:3 '${ROS_SOURCE_CMD} rqt' C-m"
     fi
 fi
 

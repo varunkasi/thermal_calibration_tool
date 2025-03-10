@@ -189,8 +189,6 @@ class ThermalCalibrationPlugin(PyPlugin):
     4. Calibrate the camera to map raw values to temperatures
     5. View calibrated temperature values
     """
-    # Add this signal
-    image_update_signal = Signal(object)  # Signal to update image from main thread
     
     def __init__(self, context):
         """Initialize the plugin."""
@@ -226,15 +224,15 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.last_raw_values = {}  # Store raw values by coordinates to maintain consistency
         self.image_mutex = QMutex()  # For thread safety
         
+        # Define signals for thread-safe UI updates
+        self.image_update_signal = Signal(object)  # Create signal as instance variable
+        self.image_update_signal.connect(self._update_image_display_from_signal)  # Connect signal
+        
         # Define callback groups for threading safety
         self.callback_group = ReentrantCallbackGroup()
         
         # Initialize UI
         self._init_ui()
-        
-        # Add signals for thread-safe UI updates
-        self.image_update_signal = Signal(object)
-        self.image_update_signal.connect(self._update_image_display_from_signal)
         
         # Initialize ROS communication
         self._setup_ros_communication()

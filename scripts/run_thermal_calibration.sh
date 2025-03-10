@@ -294,22 +294,30 @@ docker exec $CONTAINER_NAME bash -c "mkdir -p ${CONTAINER_WORKSPACE_DIR}/src"
 
 # Check if the required packages exist in the workspace
 log_info "Checking for required ROS packages in the workspace..."
-PACKAGES_CHECK=$(docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && \
-  if [ -f ${CONTAINER_WORKSPACE_DIR}/install/setup.bash ]; then \
-    . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && \
-    REQ_PACKAGES=0; \
-    ros2 pkg list | grep -q 'usb_cam' && REQ_PACKAGES=\$((REQ_PACKAGES+1)); \
-    ros2 pkg list | grep -q 'mono16_converter' && REQ_PACKAGES=\$((REQ_PACKAGES+1)); \
-    ros2 pkg list | grep -q 'thermal_calibration_interfaces' && REQ_PACKAGES=\$((REQ_PACKAGES+1)); \
-    ros2 pkg list | grep -q 'thermal_calibration_rqt' && REQ_PACKAGES=\$((REQ_PACKAGES+1)); \
-    if [ \$REQ_PACKAGES -eq 4 ]; then \
-      echo 'all_found'; \
-    else \
-      echo 'missing:'$([ \$(ros2 pkg list | grep -c 'usb_cam') -eq 0 ] && echo ' usb_cam')$([ \$(ros2 pkg list | grep -c 'mono16_converter') -eq 0 ] && echo ' mono16_converter')$([ \$(ros2 pkg list | grep -c 'thermal_calibration_interfaces') -eq 0 ] && echo ' thermal_calibration_interfaces')$([ \$(ros2 pkg list | grep -c 'thermal_calibration_rqt') -eq 0 ] && echo ' thermal_calibration_rqt'); \
-    fi; \
-  else \
-    echo 'setup_missing'; \
-  fi")
+# Create a simple script to check for packages
+docker exec $CONTAINER_NAME bash -c "cat > /tmp/check_packages.sh << 'EOF'
+#!/bin/bash
+source /opt/ros/humble/setup.bash
+if [ -f \$1/install/setup.bash ]; then
+  source \$1/install/setup.bash
+  MISSING=""
+  ros2 pkg list | grep -q 'usb_cam' || MISSING="\$MISSING usb_cam"
+  ros2 pkg list | grep -q 'mono16_converter' || MISSING="\$MISSING mono16_converter"
+  ros2 pkg list | grep -q 'thermal_calibration_interfaces' || MISSING="\$MISSING thermal_calibration_interfaces"
+  ros2 pkg list | grep -q 'thermal_calibration_rqt' || MISSING="\$MISSING thermal_calibration_rqt"
+  if [ -z "\$MISSING" ]; then
+    echo 'all_found'
+  else
+    echo "missing:\$MISSING"
+  fi
+else
+  echo 'setup_missing'
+fi
+EOF
+chmod +x /tmp/check_packages.sh"
+
+# Run the script
+PACKAGES_CHECK=$(docker exec $CONTAINER_NAME bash -c "/tmp/check_packages.sh ${CONTAINER_WORKSPACE_DIR}")
 
 # Only build if packages are missing or build is forced
 if [ "$PACKAGES_CHECK" != "all_found" ]; then

@@ -297,54 +297,72 @@ log_info "Checking for required ROS packages in the workspace..."
 PACKAGES_CHECK=$(docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && \
   if [ -f ${CONTAINER_WORKSPACE_DIR}/install/setup.bash ]; then \
     . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && \
-    (ros2 pkg list | grep -q 'usb_cam' && \
-     ros2 pkg list | grep -q 'mono16_converter' && \
-     ros2 pkg list | grep -q 'thermal_calibration_interfaces' && \
-     ros2 pkg list | grep -q 'thermal_calibration_rqt' && \
-     echo 'all_found' || echo 'some_missing'); \
+    REQ_PACKAGES=0; \
+    ros2 pkg list | grep -q 'usb_cam' && REQ_PACKAGES=\$((REQ_PACKAGES+1)); \
+    ros2 pkg list | grep -q 'mono16_converter' && REQ_PACKAGES=\$((REQ_PACKAGES+1)); \
+    ros2 pkg list | grep -q 'thermal_calibration_interfaces' && REQ_PACKAGES=\$((REQ_PACKAGES+1)); \
+    ros2 pkg list | grep -q 'thermal_calibration_rqt' && REQ_PACKAGES=\$((REQ_PACKAGES+1)); \
+    if [ \$REQ_PACKAGES -eq 4 ]; then \
+      echo 'all_found'; \
+    else \
+      echo 'missing:'$([ \$(ros2 pkg list | grep -c 'usb_cam') -eq 0 ] && echo ' usb_cam')$([ \$(ros2 pkg list | grep -c 'mono16_converter') -eq 0 ] && echo ' mono16_converter')$([ \$(ros2 pkg list | grep -c 'thermal_calibration_interfaces') -eq 0 ] && echo ' thermal_calibration_interfaces')$([ \$(ros2 pkg list | grep -c 'thermal_calibration_rqt') -eq 0 ] && echo ' thermal_calibration_rqt'); \
+    fi; \
   else \
     echo 'setup_missing'; \
   fi")
 
 # Only build if packages are missing or build is forced
 if [ "$PACKAGES_CHECK" != "all_found" ]; then
-    log_warning "Some required packages are missing. Setting BUILD_PACKAGES=true."
+    log_warning "Some required packages are missing: ${PACKAGES_CHECK#missing:}. Setting BUILD_PACKAGES=true."
     BUILD_PACKAGES=true
+else
+    log_info "All required packages found: usb_cam, mono16_converter, thermal_calibration_interfaces, thermal_calibration_rqt"
 fi
 
 if [ "$BUILD_PACKAGES" = true ]; then
-    log_info "Building thermal calibration packages..."
+    log_info "Building missing thermal calibration packages..."
     
     # Clean build if requested
     if [ "$CLEAN_BUILD" = true ]; then
         log_info "Cleaning previous build artifacts..."
-        docker exec $CONTAINER_NAME bash -c "rm -rf ${CONTAINER_WORKSPACE_DIR}/build/thermal_calibration_interfaces"
-        docker exec $CONTAINER_NAME bash -c "rm -rf ${CONTAINER_WORKSPACE_DIR}/build/thermal_calibration_rqt"
+        if [[ "$PACKAGES_CHECK" == *"thermal_calibration_interfaces"* ]]; then
+            docker exec $CONTAINER_NAME bash -c "rm -rf ${CONTAINER_WORKSPACE_DIR}/build/thermal_calibration_interfaces"
+        fi
+        if [[ "$PACKAGES_CHECK" == *"thermal_calibration_rqt"* ]]; then
+            docker exec $CONTAINER_NAME bash -c "rm -rf ${CONTAINER_WORKSPACE_DIR}/build/thermal_calibration_rqt"
+        fi
     fi
     
-    # Build packages individually for better error handling
-    log_info "Building thermal_calibration_interfaces..."
-    docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && cd ${CONTAINER_WORKSPACE_DIR} && \
-      colcon build --symlink-install --packages-select thermal_calibration_interfaces"
-    
-    if [ $? -ne 0 ]; then
-        log_error "Failed to build thermal_calibration_interfaces. Trying to continue..."
-    else
-        log_success "Built thermal_calibration_interfaces successfully."
+    # Build only the missing packages individually for better error handling
+    if [[ "$PACKAGES_CHECK" == *"thermal_calibration_interfaces"* ]]; then
+        log_info "Building missing package: thermal_calibration_interfaces..."
+        docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && cd ${CONTAINER_WORKSPACE_DIR} && \
+          colcon build --symlink-install --packages-select thermal_calibration_interfaces"
+        
+        if [ $? -ne 0 ]; then
+            log_error "Failed to build thermal_calibration_interfaces. Trying to continue..."
+        else
+            log_success "Built thermal_calibration_interfaces successfully."
+        fi
     fi
     
-    log_info "Building thermal_calibration_rqt..."
-    docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && \
-      [ -f ${CONTAINER_WORKSPACE_DIR}/install/thermal_calibration_interfaces/share/thermal_calibration_interfaces/package.xml ] && \
-      . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && \
-      cd ${CONTAINER_WORKSPACE_DIR} && \
-      colcon build --symlink-install --packages-select thermal_calibration_rqt || echo 'Build failed but continuing...'"
-    
-    if [ $? -ne 0 ]; then
-        log_error "Failed to build thermal_calibration_rqt. Trying to continue..."
-    else
-        log_success "Built thermal_calibration_rqt successfully."
+    if [[ "$PACKAGES_CHECK" == *"thermal_calibration_rqt"* ]]; then
+        log_info "Building missing package: thermal_calibration_rqt..."
+        docker exec $CONTAINER_NAME bash -c ". /opt/ros/humble/setup.bash && \
+          [ -f ${CONTAINER_WORKSPACE_DIR}/install/setup.bash ] && \
+          . ${CONTAINER_WORKSPACE_DIR}/install/setup.bash && \
+          cd ${CONTAINER_WORKSPACE_DIR} && \
+          colcon build --symlink-install --packages-select thermal_calibration_rqt || echo 'Build failed but continuing...'"
+        
+        if [ $? -ne 0 ]; then
+            log_error "Failed to build thermal_calibration_rqt. Trying to continue..."
+        else
+            log_success "Built thermal_calibration_rqt successfully."
+        fi
     fi
+    
+    # Note: We don't attempt to build usb_cam or mono16_converter here
+    # These should be installed from ros-humble packages if missing
 else
     log_info "Skipping build as packages are already installed."
 fi

@@ -14,7 +14,7 @@ from python_qt_binding.QtGui import QImage, QPixmap, QPen, QColor
 from python_qt_binding.QtWidgets import (QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                                          QLabel, QSplitter, QTableWidget, QTableWidgetItem,
                                          QHeaderView, QMessageBox, QInputDialog, QDoubleSpinBox,
-                                         QComboBox, QFileDialog)
+                                         QComboBox, QFileDialog, QStyle)
 
 from qt_gui.plugin import Plugin
 from rqt_gui_py.plugin import Plugin as PyPlugin

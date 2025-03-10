@@ -9,12 +9,19 @@ import cv2
 from cv_bridge import CvBridge
 
 from python_qt_binding import loadUi
-from python_qt_binding.QtCore import Qt, QTimer, Signal, Slot
+from python_qt_binding.QtCore import Qt, QTimer, Signal, Slot, QObject, QMutex, QMutexLocker
 from python_qt_binding.QtGui import QImage, QPixmap, QPen, QColor
 from python_qt_binding.QtWidgets import (QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                                          QLabel, QSplitter, QTableWidget, QTableWidgetItem,
                                          QHeaderView, QMessageBox, QInputDialog, QDoubleSpinBox,
                                          QComboBox, QFileDialog, QStyle)
+
+import traceback
+import time
+import threading
+from functools import partial
+from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 
 from qt_gui.plugin import Plugin
 from rqt_gui_py.plugin import Plugin as PyPlugin
@@ -171,6 +178,7 @@ class ThermalImageView(QLabel):
 
 
 class ThermalCalibrationPlugin(PyPlugin):
+
     """
     RQT plugin for thermal camera calibration.
     
@@ -181,6 +189,8 @@ class ThermalCalibrationPlugin(PyPlugin):
     4. Calibrate the camera to map raw values to temperatures
     5. View calibrated temperature values
     """
+    # Add this signal
+    image_update_signal = Signal(object)  # Signal to update image from main thread
     
     def __init__(self, context):
         """Initialize the plugin."""
@@ -196,8 +206,8 @@ class ThermalCalibrationPlugin(PyPlugin):
         parser = ArgumentParser()
         # Add argument(s) to the parser.
         parser.add_argument("-q", "--quiet", action="store_true",
-                      dest="quiet",
-                      help="Put plugin in silent mode")
+                    dest="quiet",
+                    help="Put plugin in silent mode")
         args, unknowns = parser.parse_known_args(context.argv())
         
         # Create the main widget
@@ -213,9 +223,18 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.calibration_model = None
         self.selected_coords = None
         self.radiometric_mode = False
+        self.last_raw_values = {}  # Store raw values by coordinates to maintain consistency
+        self.image_mutex = QMutex()  # For thread safety
+        
+        # Define callback groups for threading safety
+        self.callback_group = ReentrantCallbackGroup()
         
         # Initialize UI
         self._init_ui()
+        
+        # Add signals for thread-safe UI updates
+        self.image_update_signal = Signal(object)
+        self.image_update_signal.connect(self._update_image_display_from_signal)
         
         # Initialize ROS communication
         self._setup_ros_communication()
@@ -223,7 +242,26 @@ class ThermalCalibrationPlugin(PyPlugin):
         # Add widget to the user interface
         context.add_widget(self._widget)
         
-        self.last_raw_values = {}  # Store raw values by coordinates to maintain consistency
+        # Create timer for regular UI updates
+        self.update_timer = QTimer(self._widget)
+        self.update_timer.timeout.connect(self._update_ui)
+        self.update_timer.start(100)  # Update every 100ms
+        
+        # Create timer for service availability checking
+        self.service_check_timer = QTimer(self._widget)
+        self.service_check_timer.timeout.connect(self._try_reconnect_services)
+        self.service_check_timer.start(5000)  # Check services every 5 seconds
+        
+        # Create timer for reducing update frequency when not in focus
+        self.focus_check_timer = QTimer(self._widget)
+        self.focus_check_timer.timeout.connect(self._check_focus)
+        self.focus_check_timer.start(1000)  # Check focus every 1 second
+        
+        # Initialize focus status
+        self.is_in_focus = False
+        
+        # Log initialization
+        self._node.get_logger().info("Thermal calibration plugin initialized")
         
     def _init_ui(self):
         """Initialize the user interface."""
@@ -433,6 +471,41 @@ class ThermalCalibrationPlugin(PyPlugin):
         
         # Wait for services to be available
         self._node.get_logger().info('Waiting for thermal calibration services...')
+
+    @Slot(object)
+    def _update_image_display_from_signal(self, img_data):
+        """Update image display from the main thread."""
+        if not self._widget.isVisible():
+            return
+            
+        try:
+            with QMutexLocker(self.image_mutex):
+                if isinstance(img_data, np.ndarray):
+                    if len(img_data.shape) == 2:  # If it's a grayscale image
+                        self._update_image_display(img_data)
+                    elif len(img_data.shape) == 3:  # If it's already a colored image
+                        # Just update directly
+                        h, w, c = img_data.shape
+                        q_img = QImage(img_data.data, w, h, w * c, QImage.Format_RGB888).rgbSwapped()
+                        pixmap = QPixmap.fromImage(q_img)
+                        self.image_view.setPixmap(pixmap)
+        except Exception as e:
+            self._node.get_logger().error(f'Error updating image from signal: {e}')
+
+    def _check_focus(self):
+        """Check if the widget is in focus and adjust update frequency."""
+        is_visible = self._widget.isVisible() and not self._widget.isMinimized()
+        
+        if is_visible != self.is_in_focus:
+            self.is_in_focus = is_visible
+            
+            # Adjust image subscription QoS based on focus
+            if is_visible:
+                # If visible, use normal update frequency
+                self._node.get_logger().debug("Plugin is visible, using normal update frequency")
+            else:
+                # If not visible, reduce update frequency to save resources
+                self._node.get_logger().debug("Plugin is not visible, reducing update frequency")
         
     def _image_16bit_callback(self, msg):
         """Callback for 16-bit thermal image used for calibration."""
@@ -442,7 +515,10 @@ class ThermalCalibrationPlugin(PyPlugin):
             
             # Process this image for display if we don't have an 8-bit stream
             if not hasattr(self, 'has_8bit_stream') or not self.has_8bit_stream:
-                self._update_display_from_16bit()
+                # Instead of directly updating the display, emit signal for main thread to handle
+                display_img = cv2.normalize(self.current_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                colored_img = cv2.applyColorMap(display_img, cv2.COLORMAP_INFERNO)
+                self.image_update_signal.emit(colored_img)
             
             # If we have selected coordinates, update the raw value
             if hasattr(self, 'selected_coords') and self.selected_coords:
@@ -458,7 +534,8 @@ class ThermalCalibrationPlugin(PyPlugin):
                     if coord_key not in self.last_raw_values:
                         self.last_raw_values[coord_key] = current_raw
                         self.current_raw_value = current_raw
-                        self.raw_value_label.setText(f"Raw value: {current_raw}")
+                        # Use signal to update UI from main thread
+                        self._node.create_timer(0.01, lambda: self.raw_value_label.setText(f"Raw value: {current_raw}"), cancel=True)
                     else:
                         # Use a moving average to smooth out noise
                         smoothing_factor = 0.8  # 80% old value, 20% new value
@@ -469,17 +546,20 @@ class ThermalCalibrationPlugin(PyPlugin):
                         # Only update display if value changed significantly
                         if abs(smoothed_raw - self.current_raw_value) > 2:
                             self.current_raw_value = smoothed_raw
-                            self.raw_value_label.setText(f"Raw value: {smoothed_raw}")
+                            # Use signal to update UI from main thread
+                            self._node.create_timer(0.01, lambda: self.raw_value_label.setText(f"Raw value: {smoothed_raw}"), cancel=True)
                     
                     # Update temperature if in radiometric mode
                     if self.radiometric_mode and self.calibration_model:
-                        self._update_temperature_display(self.current_raw_value)
+                        # Use signal or timer to update from main thread
+                        self._node.create_timer(0.01, lambda: self._update_temperature_display(self.current_raw_value), cancel=True)
                     elif not self.calibration_model:
-                        self.temp_label.setText("Temperature: (calibration pending)")
-            
+                        self._node.create_timer(0.01, lambda: self.temp_label.setText("Temperature: (calibration pending)"), cancel=True)
+        
         except Exception as e:
             self._node.get_logger().error(f'Error processing 16-bit image: {e}')
-    
+            self._node.get_logger().error(traceback.format_exc())
+
     def _image_8bit_callback(self, msg):
         """Callback for 8-bit thermal image used for visualization."""
         try:
@@ -490,22 +570,9 @@ class ThermalCalibrationPlugin(PyPlugin):
             img_8bit = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono8")
             
             # Store the image for colormap changes
-            self.last_8bit_image = img_8bit
+            self.last_8bit_image = img_8bit.copy()
             
-            # Update the display with the current image
-            self._update_image_display(img_8bit)
-        
-        except Exception as e:
-            self._node.get_logger().error(f'Error processing 8-bit image: {e}')
-
-    def _update_image_display(self, img_8bit):
-        """Update the image display with the given 8-bit image using the selected colormap."""
-        try:
-            # Only update the display if the widget is visible
-            if not self._widget.isVisible():
-                return
-                
-            # Apply selected colormap
+            # Apply colormap (moved from _update_image_display)
             if not hasattr(self, 'current_colormap'):
                 self.current_colormap = "Grayscale"
                 
@@ -523,16 +590,31 @@ class ThermalCalibrationPlugin(PyPlugin):
                 colormap = colormap_map.get(self.current_colormap, cv2.COLORMAP_INFERNO)
                 colored_img = cv2.applyColorMap(img_8bit, colormap)
             
+            # Send the colored image via signal to the main thread for UI update
+            self.image_update_signal.emit(colored_img)
+        
+        except Exception as e:
+            self._node.get_logger().error(f'Error processing 8-bit image: {e}')
+            self._node.get_logger().error(traceback.format_exc())
+
+    def _update_image_display(self, colored_img):
+        """Update the image display with the given colored image."""
+        try:
+            # Only update if widget is visible
+            if not self._widget.isVisible():
+                return
+                
             # Convert OpenCV image to QImage then QPixmap for display
             h, w, c = colored_img.shape
             q_img = QImage(colored_img.data, w, h, w * c, QImage.Format_RGB888).rgbSwapped()
             pixmap = QPixmap.fromImage(q_img)
             
-            # Update image view (don't scale here - let the widget handle it)
+            # Update image view
             self.image_view.setPixmap(pixmap)
         
         except Exception as e:
             self._node.get_logger().error(f'Error updating image display: {e}')
+            self._node.get_logger().error(traceback.format_exc())
     
     def _update_display_from_16bit(self):
         """Update the display using the 16-bit image when 8-bit stream is not available."""

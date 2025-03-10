@@ -36,6 +36,10 @@ from thermal_calibration_interfaces.srv import (
 class SignalHelper(QObject):
     """Helper class to hold Qt signals."""
     image_update_signal = pyqtSignal(object)
+    raw_value_update_signal = pyqtSignal(str)
+    temp_update_signal = pyqtSignal(str)
+    points_table_update_signal = pyqtSignal()
+    cal_results_update_signal = pyqtSignal()
 
 class ThermalImageView(QLabel):
     """Custom widget for displaying the thermal image with interactive features."""
@@ -180,6 +184,9 @@ class ThermalImageView(QLabel):
                 painter.setPen(QPen(QColor(255, 255, 255), 1))
                 point_index = self.calibration_points.index((x, y, temp, raw_value)) + 1
                 painter.drawText(int(widget_x + size + 2), int(widget_y), f"P{point_index}: {temp}°C")
+            
+            # Ensure we end the painter properly
+            painter.end()
 
 
 class ThermalCalibrationPlugin(PyPlugin):
@@ -231,12 +238,16 @@ class ThermalCalibrationPlugin(PyPlugin):
         # Define callback groups for threading safety
         self.callback_group = ReentrantCallbackGroup()
         
-        # Initialize UI
-        self._init_ui()
-        
         # Set up signal helper and connect signals
         self.signal_helper = SignalHelper()
         self.signal_helper.image_update_signal.connect(self._update_image_display_from_signal)
+        self.signal_helper.raw_value_update_signal.connect(self._update_raw_value_label)
+        self.signal_helper.temp_update_signal.connect(self._update_temp_label)
+        self.signal_helper.points_table_update_signal.connect(self._update_points_table)
+        self.signal_helper.cal_results_update_signal.connect(self._update_calibration_results)
+        
+        # Initialize UI
+        self._init_ui()
         
         # Initialize ROS communication
         self._setup_ros_communication()
@@ -261,6 +272,11 @@ class ThermalCalibrationPlugin(PyPlugin):
         
         # Initialize focus status
         self.is_in_focus = False
+        
+        # Set up pixmap for empty image
+        self.empty_pixmap = QPixmap(640, 480)
+        self.empty_pixmap.fill(Qt.black)
+        self.image_view.setPixmap(self.empty_pixmap)
         
         # Log initialization
         self._node.get_logger().info("Thermal calibration plugin initialized")
@@ -494,6 +510,16 @@ class ThermalCalibrationPlugin(PyPlugin):
         except Exception as e:
             self._node.get_logger().error(f'Error updating image from signal: {e}')
 
+    @Slot(str)
+    def _update_raw_value_label(self, text):
+        """Update raw value label from signal."""
+        self.raw_value_label.setText(text)
+    
+    @Slot(str)
+    def _update_temp_label(self, text):
+        """Update temperature label from signal."""
+        self.temp_label.setText(text)
+
     def _check_focus(self):
         """Check if the widget is in focus and adjust update frequency."""
         is_visible = self._widget.isVisible() and not self._widget.isMinimized()
@@ -537,7 +563,7 @@ class ThermalCalibrationPlugin(PyPlugin):
                         self.last_raw_values[coord_key] = current_raw
                         self.current_raw_value = current_raw
                         # Use signal to update UI from main thread
-                        self._node.create_timer(0.01, lambda: self.raw_value_label.setText(f"Raw value: {current_raw}"), cancel=True)
+                        self.signal_helper.raw_value_update_signal.emit(f"Raw value: {current_raw}")
                     else:
                         # Use a moving average to smooth out noise
                         smoothing_factor = 0.8  # 80% old value, 20% new value
@@ -549,14 +575,14 @@ class ThermalCalibrationPlugin(PyPlugin):
                         if abs(smoothed_raw - self.current_raw_value) > 2:
                             self.current_raw_value = smoothed_raw
                             # Use signal to update UI from main thread
-                            self._node.create_timer(0.01, lambda: self.raw_value_label.setText(f"Raw value: {smoothed_raw}"), cancel=True)
+                            self.signal_helper.raw_value_update_signal.emit(f"Raw value: {smoothed_raw}")
                     
                     # Update temperature if in radiometric mode
                     if self.radiometric_mode and self.calibration_model:
-                        # Use signal or timer to update from main thread
-                        self._node.create_timer(0.01, lambda: self._update_temperature_display(self.current_raw_value), cancel=True)
+                        # Use signal to update from main thread
+                        self._update_temperature_display(self.current_raw_value)
                     elif not self.calibration_model:
-                        self._node.create_timer(0.01, lambda: self.temp_label.setText("Temperature: (calibration pending)"), cancel=True)
+                        self.signal_helper.temp_update_signal.emit("Temperature: (calibration pending)")
         
         except Exception as e:
             self._node.get_logger().error(f'Error processing 16-bit image: {e}')
@@ -626,15 +652,27 @@ class ThermalCalibrationPlugin(PyPlugin):
         try:
             # Convert to display image (apply colormap)
             display_img = cv2.normalize(self.current_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-            colored_img = cv2.applyColorMap(display_img, cv2.COLORMAP_INFERNO)
             
-            # Convert OpenCV image to QImage then QPixmap for display
-            h, w, c = colored_img.shape
-            q_img = QImage(colored_img.data, w, h, w * c, QImage.Format_RGB888).rgbSwapped()
-            pixmap = QPixmap.fromImage(q_img)
+            # Apply current colormap
+            if not hasattr(self, 'current_colormap'):
+                self.current_colormap = "Grayscale"
+                
+            if self.current_colormap == "Grayscale":
+                # For grayscale, we don't apply a colormap, but convert to RGB
+                colored_img = cv2.cvtColor(display_img, cv2.COLOR_GRAY2BGR)
+            else:
+                # Map colormap name to OpenCV constant
+                colormap_map = {
+                    "Inferno": cv2.COLORMAP_INFERNO,
+                    "Jet": cv2.COLORMAP_JET,
+                    "Viridis": cv2.COLORMAP_VIRIDIS,
+                    "Rainbow": cv2.COLORMAP_RAINBOW
+                }
+                colormap = colormap_map.get(self.current_colormap, cv2.COLORMAP_INFERNO)
+                colored_img = cv2.applyColorMap(display_img, colormap)
             
-            # Update image view
-            self.image_view.setPixmap(pixmap)
+            # Send via signal to the main thread
+            self.signal_helper.image_update_signal.emit(colored_img)
         
         except Exception as e:
             self._node.get_logger().error(f'Error updating display from 16-bit: {e}')
@@ -658,17 +696,17 @@ class ThermalCalibrationPlugin(PyPlugin):
                     h, w = self.current_image.shape
                     if 0 <= y < h and 0 <= x < w:
                         self.current_raw_value = int(self.current_image[y, x])
-                        self.raw_value_label.setText(f"Raw value: {self.current_raw_value}")
+                        self.signal_helper.raw_value_update_signal.emit(f"Raw value: {self.current_raw_value}")
                         
                         # Update temperature display if in radiometric mode
                         if self.radiometric_mode and self.calibration_model:
                             self._update_temperature_display(self.current_raw_value)
                         elif not self.calibration_model:
-                            self.temp_label.setText("Temperature: (calibration pending)")
+                            self.signal_helper.temp_update_signal.emit("Temperature: (calibration pending)")
                         else:
-                            self.temp_label.setText("Temperature: (enable radiometric mode)")
+                            self.signal_helper.temp_update_signal.emit("Temperature: (enable radiometric mode)")
                     else:
-                        self.raw_value_label.setText("Raw value: Out of bounds")
+                        self.signal_helper.raw_value_update_signal.emit("Raw value: Out of bounds")
                 except Exception as e:
                     self._node.get_logger().error(f'Error processing pixel click: {str(e)}')
             else:
@@ -730,9 +768,15 @@ class ThermalCalibrationPlugin(PyPlugin):
         x, y = self.selected_coords
         self._call_add_calibration_point(x, y, self.current_raw_value, reference_temp)
         
+        # Add point to image view with raw value (directly, not waiting for service callback)
+        self.image_view.add_calibration_point(x, y, reference_temp, self.current_raw_value)
+        
         # Hide temperature input controls
         self.temp_input_widget.setVisible(False)
         self.enter_temp_btn.setEnabled(True)
+        
+        # Enable remove last button
+        self.remove_last_btn.setEnabled(True)
     
     def _on_cancel_temp_clicked(self):
         """Handle click on cancel temperature button."""
@@ -746,41 +790,45 @@ class ThermalCalibrationPlugin(PyPlugin):
         if not self.calibration_points:
             return
         
-        # Get the last point
-        last_point = self.calibration_points[-1]
-        
-        # Ask for confirmation
-        reply = QMessageBox.question(
-            self._widget, "Remove Point", 
-            f"Remove calibration point at ({last_point['x']}, {last_point['y']}) with temperature {last_point['reference_temp']}°C?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            # Remove from our local list
-            self.calibration_points.pop()
+        try:
+            # Get the last point
+            last_point = self.calibration_points[-1]
             
-            # Remove from image view
-            if self.image_view.calibration_points:
-                self.image_view.remove_calibration_point(len(self.image_view.calibration_points) - 1)
+            # Ask for confirmation
+            reply = QMessageBox.question(
+                self._widget, "Remove Point", 
+                f"Remove calibration point at ({last_point['x']}, {last_point['y']}) with temperature {last_point['reference_temp']}°C?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
             
-            # Update UI
-            self._update_points_table()
+            if reply == QMessageBox.Yes:
+                # Remove from our local list
+                self.calibration_points.pop()
+                
+                # Remove from image view
+                if self.image_view.calibration_points:
+                    self.image_view.remove_calibration_point(len(self.image_view.calibration_points) - 1)
+                
+                # Update UI via signal
+                self.signal_helper.points_table_update_signal.emit()
+                
+                # Call service to remove point (if implemented)
+                # For now, we'll just clear all and re-add the remaining points
+                self._call_clear_calibration_data()
+                
+                # Re-add all remaining points
+                for point in self.calibration_points:
+                    self._call_add_calibration_point(
+                        point['x'], point['y'], point['raw_value'], point['reference_temp']
+                    )
+                
+                # Disable remove button if no more points
+                if not self.calibration_points:
+                    self.remove_last_btn.setEnabled(False)
             
-            # Call service to remove point (if implemented)
-            # For now, we'll just clear all and re-add the remaining points
-            self._call_clear_calibration_data()
-            
-            # Re-add all remaining points
-            for point in self.calibration_points:
-                self._call_add_calibration_point(
-                    point['x'], point['y'], point['raw_value'], point['reference_temp']
-                )
-            
-            # Disable remove button if no more points
-            if not self.calibration_points:
-                self.remove_last_btn.setEnabled(False)
+        except Exception as e:
+            self._node.get_logger().error(f'Error removing last point: {e}')
 
     def _on_calibrate_clicked(self):
         """Handle click on calibrate button."""
@@ -838,9 +886,9 @@ class ThermalCalibrationPlugin(PyPlugin):
             self.radio_toggle.setText("Enable Radiometric Mode")
             # Update temperature label to show it's disabled
             if self.calibration_model:
-                self.temp_label.setText("Temperature: (enable radiometric mode)")
+                self.signal_helper.temp_update_signal.emit("Temperature: (enable radiometric mode)")
             else:
-                self.temp_label.setText("Temperature: (calibration pending)")
+                self.signal_helper.temp_update_signal.emit("Temperature: (calibration pending)")
     
     def _update_ui(self):
         """Periodically update UI elements."""
@@ -849,62 +897,87 @@ class ThermalCalibrationPlugin(PyPlugin):
     
     def _update_points_table(self):
         """Update the calibration points table."""
-        # Clear table
-        self.points_table.setRowCount(0)
-        
-        # Add rows for each calibration point
-        for point in self.calibration_points:
-            row = self.points_table.rowCount()
-            self.points_table.insertRow(row)
+        try:
+            # Clear table
+            self.points_table.setRowCount(0)
             
-            # Set ID
-            id_item = QTableWidgetItem(str(point['id']))
-            self.points_table.setItem(row, 0, id_item)
-            
-            # Set coordinates
-            coords_item = QTableWidgetItem(f"({point['x']}, {point['y']})")
-            self.points_table.setItem(row, 1, coords_item)
-            
-            # Set raw value
-            raw_item = QTableWidgetItem(str(point['raw_value']))
-            self.points_table.setItem(row, 2, raw_item)
-            
-            # Set temperature
-            temp_item = QTableWidgetItem(f"{point['reference_temp']:.1f}")
-            self.points_table.setItem(row, 3, temp_item)
+            # Add rows for each calibration point
+            for point in self.calibration_points:
+                row = self.points_table.rowCount()
+                self.points_table.insertRow(row)
+                
+                # Set ID
+                id_item = QTableWidgetItem(str(point['id']))
+                self.points_table.setItem(row, 0, id_item)
+                
+                # Set coordinates
+                coords_item = QTableWidgetItem(f"({point['x']}, {point['y']})")
+                self.points_table.setItem(row, 1, coords_item)
+                
+                # Set raw value
+                raw_item = QTableWidgetItem(str(point['raw_value']))
+                self.points_table.setItem(row, 2, raw_item)
+                
+                # Set temperature
+                temp_item = QTableWidgetItem(f"{point['reference_temp']:.1f}")
+                self.points_table.setItem(row, 3, temp_item)
+        except Exception as e:
+            self._node.get_logger().error(f'Error updating points table: {e}')
     
     def _update_calibration_results(self):
         """Update the calibration results display."""
-        if self.calibration_model:
-            model_type = self.calibration_model['model_type']
-            r_squared = self.calibration_model['r_squared']
-            rmse = self.calibration_model['rmse']
-            
-            result_text = (f"Calibration Model: {model_type.title()}\n"
-                        f"R²: {r_squared:.4f}\n"
-                        f"RMSE: {rmse:.2f}°C")
-            
-            self.cal_results_label.setText(result_text)
-            
-            # Enable export and radiometric mode buttons
-            self.export_btn.setEnabled(True)
-            self.radio_toggle.setEnabled(True)
-            
-            # Update temperature label format now that calibration is available
-            if not self.radiometric_mode:
-                self.temp_label.setText("Temperature: (enable radiometric mode)")
-        else:
-            self.cal_results_label.setText("No calibration performed yet")
-            self.export_btn.setEnabled(False)
-            self.radio_toggle.setEnabled(False)
-            self.temp_label.setText("Temperature: (calibration pending)")
+        try:
+            if self.calibration_model:
+                model_type = self.calibration_model['model_type']
+                r_squared = self.calibration_model['r_squared']
+                rmse = self.calibration_model['rmse']
+                
+                result_text = (f"Calibration Model: {model_type.title()}\n"
+                            f"R²: {r_squared:.4f}\n"
+                            f"RMSE: {rmse:.2f}°C")
+                
+                self.cal_results_label.setText(result_text)
+                
+                # Enable export and radiometric mode buttons
+                self.export_btn.setEnabled(True)
+                self.radio_toggle.setEnabled(True)
+                
+                # Update temperature label format now that calibration is available
+                if not self.radiometric_mode:
+                    self.signal_helper.temp_update_signal.emit("Temperature: (enable radiometric mode)")
+            else:
+                self.cal_results_label.setText("No calibration performed yet")
+                self.export_btn.setEnabled(False)
+                self.radio_toggle.setEnabled(False)
+                self.signal_helper.temp_update_signal.emit("Temperature: (calibration pending)")
+        except Exception as e:
+            self._node.get_logger().error(f'Error updating calibration results: {e}')
 
     def _on_colormap_changed(self, colormap_name):
         """Handle change in colormap selection."""
         self.current_colormap = colormap_name
         # Refresh the display if we have an image
         if hasattr(self, 'has_8bit_stream') and self.has_8bit_stream and hasattr(self, 'last_8bit_image'):
-            self._update_image_display(self.last_8bit_image)
+            try:
+                # Apply colormap
+                if colormap_name == "Grayscale":
+                    # For grayscale, we don't apply a colormap, but convert to RGB
+                    colored_img = cv2.cvtColor(self.last_8bit_image, cv2.COLOR_GRAY2BGR)
+                else:
+                    # Map colormap name to OpenCV constant
+                    colormap_map = {
+                        "Inferno": cv2.COLORMAP_INFERNO,
+                        "Jet": cv2.COLORMAP_JET,
+                        "Viridis": cv2.COLORMAP_VIRIDIS,
+                        "Rainbow": cv2.COLORMAP_RAINBOW
+                    }
+                    colormap = colormap_map.get(colormap_name, cv2.COLORMAP_INFERNO)
+                    colored_img = cv2.applyColorMap(self.last_8bit_image, colormap)
+                
+                # Send via signal to main thread
+                self.signal_helper.image_update_signal.emit(colored_img)
+            except Exception as e:
+                self._node.get_logger().error(f'Error applying colormap: {e}')
         elif self.current_image is not None:
             self._update_display_from_16bit()
 
@@ -929,7 +1002,7 @@ class ThermalCalibrationPlugin(PyPlugin):
             response = future.result()
             if response.success:
                 self.current_raw_value = response.raw_value
-                self.raw_value_label.setText(f"Raw value: {response.raw_value}")
+                self.signal_helper.raw_value_update_signal.emit(f"Raw value: {response.raw_value}")
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
     
@@ -964,8 +1037,8 @@ class ThermalCalibrationPlugin(PyPlugin):
                 }
                 self.calibration_points.append(point)
                 
-                # Update UI
-                self._update_points_table()
+                # Update UI via signal
+                self.signal_helper.points_table_update_signal.emit()
                 QMessageBox.information(self._widget, "Success", response.message)
             else:
                 QMessageBox.warning(self._widget, "Error", response.message)
@@ -1001,8 +1074,8 @@ class ThermalCalibrationPlugin(PyPlugin):
                     'timestamp': datetime.now().isoformat()
                 }
                 
-                # Update UI
-                self._update_calibration_results()
+                # Update UI via signal
+                self.signal_helper.cal_results_update_signal.emit()
                 QMessageBox.information(self._widget, "Success", response.message)
             else:
                 QMessageBox.warning(self._widget, "Calibration Error", response.message)
@@ -1034,9 +1107,9 @@ class ThermalCalibrationPlugin(PyPlugin):
                 # Clear image view points
                 self.image_view.clear_calibration_points()
                 
-                # Update UI
-                self._update_points_table()
-                self._update_calibration_results()
+                # Update UI via signals
+                self.signal_helper.points_table_update_signal.emit()
+                self.signal_helper.cal_results_update_signal.emit()
                 
                 # Disable radiometric mode if it's enabled
                 if self.radiometric_mode:
@@ -1070,9 +1143,9 @@ class ThermalCalibrationPlugin(PyPlugin):
             response = future.result()
             if response.success:
                 temp = response.temperature
-                self.temp_label.setText(f"Temperature: {temp:.1f}°C")
+                self.signal_helper.temp_update_signal.emit(f"Temperature: {temp:.1f}°C")
             else:
-                self.temp_label.setText("Temperature: -")
+                self.signal_helper.temp_update_signal.emit("Temperature: -")
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
     
@@ -1126,8 +1199,8 @@ class ThermalCalibrationPlugin(PyPlugin):
                     'timestamp': datetime.now().isoformat()
                 }
                 
-                # Update UI
-                self._update_calibration_results()
+                # Update UI via signal
+                self.signal_helper.cal_results_update_signal.emit()
                 QMessageBox.information(self._widget, "Success", response.message)
             else:
                 QMessageBox.warning(self._widget, "Error", response.message)
@@ -1135,38 +1208,6 @@ class ThermalCalibrationPlugin(PyPlugin):
             self._node.get_logger().error(f'Service call failed: {e}')
             QMessageBox.critical(self._widget, "Error", f"Service call failed: {e}")
     
-    def shutdown_plugin(self):
-        """
-        Callback when the plugin is closed.
-        Unregisters all publishers and subscribers.
-        """
-        # Unregister subscribers
-        self.image_16bit_sub = None
-        self.image_8bit_sub = None
-        
-        # Stop the timer
-        self.update_timer.stop()
-    
-    def save_settings(self, plugin_settings, instance_settings):
-        """Save the intrinsic configuration of the plugin."""
-        # You can save intrinsic configuration here
-        pass
-    
-    def restore_settings(self, plugin_settings, instance_settings):
-        """Restore the intrinsic configuration of the plugin."""
-        # You can restore intrinsic configuration here
-        pass
-    
-    def resizeEvent(self, event):
-        """Handle resize events."""
-        super(ThermalCalibrationPlugin, self).resizeEvent(event)
-        
-        # Request update of image display
-        if hasattr(self, 'has_8bit_stream') and self.has_8bit_stream and hasattr(self, 'last_8bit_image'):
-            self._update_image_display(self.last_8bit_image)
-        elif hasattr(self, 'current_image') and self.current_image is not None:
-            self._update_display_from_16bit()
-
     def _try_reconnect_services(self):
         """Try to reconnect to any unavailable services."""
         services_to_check = [
@@ -1192,6 +1233,55 @@ class ThermalCalibrationPlugin(PyPlugin):
             # We might want to update UI elements to reflect service availability
             # For example, enable/disable buttons that depend on services
             pass
+
+    def resizeEvent(self, event):
+        """Handle resize events."""
+        # Skip resizeEvent since this can cause issues with cross-thread pixel operations
+        pass
+        
+    def save_settings(self, plugin_settings, instance_settings):
+        """Save the intrinsic configuration of the plugin."""
+        # You can save intrinsic configuration here
+        pass
+    
+    def restore_settings(self, plugin_settings, instance_settings):
+        """Restore the intrinsic configuration of the plugin."""
+        # You can restore intrinsic configuration here
+        pass
+
+    def shutdown_plugin(self):
+        """
+        Callback when the plugin is closed.
+        Unregisters all publishers and subscribers.
+        """
+        try:
+            # Unregister subscribers
+            self.image_16bit_sub = None
+            self.image_8bit_sub = None
+            
+            # Stop all timers
+            if hasattr(self, 'update_timer') and self.update_timer is not None:
+                self.update_timer.stop()
+            
+            if hasattr(self, 'service_check_timer') and self.service_check_timer is not None:
+                self.service_check_timer.stop()
+                
+            if hasattr(self, 'focus_check_timer') and self.focus_check_timer is not None:
+                self.focus_check_timer.stop()
+                
+            # Clear any stored images to free memory
+            self.current_image = None
+            if hasattr(self, 'last_8bit_image'):
+                self.last_8bit_image = None
+                
+            # Log shutdown
+            if hasattr(self, '_node') and self._node is not None:
+                self._node.get_logger().info("Thermal calibration plugin shutdown")
+                
+        except Exception as e:
+            if hasattr(self, '_node') and self._node is not None:
+                self._node.get_logger().error(f"Error during plugin shutdown: {e}")
+
 
 def main(args=None):
     """Main function to allow standalone operation of the plugin."""

@@ -126,14 +126,18 @@ class ThermalImageView(QLabel):
             if not img_rect:
                 return
             
+            # Get current image dimensions for coordinate mapping
+            img_width = self.pixmap().width()
+            img_height = self.pixmap().height()
+            
             # Draw current selection (yellow crosshair)
             if self.selected_point:
                 img_x, img_y = self.selected_point
-                norm_x = img_x / self.pixmap().width()
-                norm_y = img_y / self.pixmap().height()
                 
-                widget_x = img_rect.left() + norm_x * img_rect.width()
-                widget_y = img_rect.top() + norm_y * img_rect.height()
+                # Map image coordinates to widget coordinates
+                # This ensures the marker stays at the correct position even if image size changes
+                widget_x = img_rect.left() + (img_x / img_width) * img_rect.width()
+                widget_y = img_rect.top() + (img_y / img_height) * img_rect.height()
                 
                 # Draw crosshair
                 painter.setPen(QPen(QColor(255, 255, 0), 2))
@@ -148,11 +152,10 @@ class ThermalImageView(QLabel):
             # Draw saved calibration points (green squares)
             painter.setPen(QPen(QColor(0, 255, 0), 2))
             for x, y, temp in self.calibration_points:
-                norm_x = x / self.pixmap().width()
-                norm_y = y / self.pixmap().height()
-                
-                widget_x = img_rect.left() + norm_x * img_rect.width()
-                widget_y = img_rect.top() + norm_y * img_rect.height()
+                # Map image coordinates to widget coordinates
+                # This ensures markers stay in the correct positions regardless of frame changes
+                widget_x = img_rect.left() + (x / img_width) * img_rect.width()
+                widget_y = img_rect.top() + (y / img_height) * img_rect.height()
                 
                 # Draw square
                 size = 8

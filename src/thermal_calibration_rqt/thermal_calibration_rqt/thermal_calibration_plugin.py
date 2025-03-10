@@ -37,14 +37,16 @@ class ThermalImageView(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(640, 480)
         self.setCursor(Qt.CrossCursor)
+        self.image_width = 0
+        self.image_height = 0
         
         # Set better size policy to maximize use of available space
         from python_qt_binding.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
-    def add_calibration_point(self, x, y, temp):
+    def add_calibration_point(self, x, y, temp, raw_value):
         """Add a point to the calibration points list."""
-        self.calibration_points.append((x, y, temp))
+        self.calibration_points.append((x, y, temp, raw_value))
         self.update()  # Trigger repaint
         
     def remove_calibration_point(self, index):
@@ -59,6 +61,13 @@ class ThermalImageView(QLabel):
         """Clear all calibration points."""
         self.calibration_points = []
         self.update()  # Trigger repaint
+    
+    def setPixmap(self, pixmap):
+        """Override setPixmap to store image dimensions."""
+        if not pixmap.isNull():
+            self.image_width = pixmap.width()
+            self.image_height = pixmap.height()
+        super(ThermalImageView, self).setPixmap(pixmap)
         
     def mousePressEvent(self, event):
         """Handle mouse press events to select a pixel."""
@@ -92,8 +101,8 @@ class ThermalImageView(QLabel):
         norm_y = (widget_y - img_rect.top()) / img_rect.height()
         
         # Map to actual image coordinates
-        img_x = int(norm_x * self.pixmap().width())
-        img_y = int(norm_y * self.pixmap().height())
+        img_x = int(norm_x * self.image_width)
+        img_y = int(norm_y * self.image_height)
         
         return (img_x, img_y)
     
@@ -126,18 +135,13 @@ class ThermalImageView(QLabel):
             if not img_rect:
                 return
             
-            # Get current image dimensions for coordinate mapping
-            img_width = self.pixmap().width()
-            img_height = self.pixmap().height()
-            
             # Draw current selection (yellow crosshair)
             if self.selected_point:
                 img_x, img_y = self.selected_point
                 
-                # Map image coordinates to widget coordinates
-                # This ensures the marker stays at the correct position even if image size changes
-                widget_x = img_rect.left() + (img_x / img_width) * img_rect.width()
-                widget_y = img_rect.top() + (img_y / img_height) * img_rect.height()
+                # Map image coordinates to widget coordinates using normalized coordinates
+                widget_x = img_rect.left() + (img_x / self.image_width) * img_rect.width()
+                widget_y = img_rect.top() + (img_y / self.image_height) * img_rect.height()
                 
                 # Draw crosshair
                 painter.setPen(QPen(QColor(255, 255, 0), 2))
@@ -149,17 +153,21 @@ class ThermalImageView(QLabel):
                 painter.setPen(QPen(QColor(255, 255, 0), 1))
                 painter.drawEllipse(int(widget_x - radius), int(widget_y - radius), radius * 2, radius * 2)
             
-            # Draw saved calibration points (green squares)
+            # Draw saved calibration points (green squares with text)
             painter.setPen(QPen(QColor(0, 255, 0), 2))
-            for x, y, temp in self.calibration_points:
-                # Map image coordinates to widget coordinates
-                # This ensures markers stay in the correct positions regardless of frame changes
-                widget_x = img_rect.left() + (x / img_width) * img_rect.width()
-                widget_y = img_rect.top() + (y / img_height) * img_rect.height()
+            for x, y, temp, raw_value in self.calibration_points:
+                # Map image coordinates to widget coordinates using normalized coordinates
+                widget_x = img_rect.left() + (x / self.image_width) * img_rect.width()
+                widget_y = img_rect.top() + (y / self.image_height) * img_rect.height()
                 
                 # Draw square
                 size = 8
                 painter.drawRect(int(widget_x - size), int(widget_y - size), size * 2, size * 2)
+                
+                # Draw point ID or temp value
+                painter.setPen(QPen(QColor(255, 255, 255), 1))
+                point_index = self.calibration_points.index((x, y, temp, raw_value)) + 1
+                painter.drawText(int(widget_x + size + 2), int(widget_y), f"P{point_index}: {temp}°C")
 
 
 class ThermalCalibrationPlugin(PyPlugin):
@@ -214,6 +222,8 @@ class ThermalCalibrationPlugin(PyPlugin):
         
         # Add widget to the user interface
         context.add_widget(self._widget)
+        
+        self.last_raw_values = {}  # Store raw values by coordinates to maintain consistency
         
     def _init_ui(self):
         """Initialize the user interface."""
@@ -438,19 +448,34 @@ class ThermalCalibrationPlugin(PyPlugin):
             if hasattr(self, 'selected_coords') and self.selected_coords:
                 x, y = self.selected_coords
                 if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                    # Update raw value from current frame
+                    # Get raw value from current frame
                     current_raw = int(self.current_image[y, x])
                     
-                    # Only update display if value changed significantly (to reduce flicker)
-                    if not hasattr(self, 'current_raw_value') or abs(current_raw - self.current_raw_value) > 2:
+                    # Store this coordinate's raw value
+                    coord_key = f"{x},{y}"
+                    
+                    # Initialize with first reading if this is a new coordinate
+                    if coord_key not in self.last_raw_values:
+                        self.last_raw_values[coord_key] = current_raw
                         self.current_raw_value = current_raw
                         self.raw_value_label.setText(f"Raw value: {current_raw}")
+                    else:
+                        # Use a moving average to smooth out noise
+                        smoothing_factor = 0.8  # 80% old value, 20% new value
+                        smoothed_raw = int(self.last_raw_values[coord_key] * smoothing_factor + 
+                                        current_raw * (1 - smoothing_factor))
+                        self.last_raw_values[coord_key] = smoothed_raw
                         
-                        # Update temperature if in radiometric mode
-                        if self.radiometric_mode and self.calibration_model:
-                            self._update_temperature_display(current_raw)
-                        elif not self.calibration_model:
-                            self.temp_label.setText("Temperature: (calibration pending)")
+                        # Only update display if value changed significantly
+                        if abs(smoothed_raw - self.current_raw_value) > 2:
+                            self.current_raw_value = smoothed_raw
+                            self.raw_value_label.setText(f"Raw value: {smoothed_raw}")
+                    
+                    # Update temperature if in radiometric mode
+                    if self.radiometric_mode and self.calibration_model:
+                        self._update_temperature_display(self.current_raw_value)
+                    elif not self.calibration_model:
+                        self.temp_label.setText("Temperature: (calibration pending)")
             
         except Exception as e:
             self._node.get_logger().error(f'Error processing 16-bit image: {e}')
@@ -476,6 +501,10 @@ class ThermalCalibrationPlugin(PyPlugin):
     def _update_image_display(self, img_8bit):
         """Update the image display with the given 8-bit image using the selected colormap."""
         try:
+            # Only update the display if the widget is visible
+            if not self._widget.isVisible():
+                return
+                
             # Apply selected colormap
             if not hasattr(self, 'current_colormap'):
                 self.current_colormap = "Grayscale"
@@ -499,16 +528,8 @@ class ThermalCalibrationPlugin(PyPlugin):
             q_img = QImage(colored_img.data, w, h, w * c, QImage.Format_RGB888).rgbSwapped()
             pixmap = QPixmap.fromImage(q_img)
             
-            # Scale the pixmap to fit the view while maintaining aspect ratio
-            scaled_pixmap = pixmap.scaled(
-                self.image_view.width(), 
-                self.image_view.height(),
-                Qt.KeepAspectRatio, 
-                Qt.SmoothTransformation
-            )
-            
-            # Update image view
-            self.image_view.setPixmap(scaled_pixmap)
+            # Update image view (don't scale here - let the widget handle it)
+            self.image_view.setPixmap(pixmap)
         
         except Exception as e:
             self._node.get_logger().error(f'Error updating image display: {e}')
@@ -600,8 +621,8 @@ class ThermalCalibrationPlugin(PyPlugin):
         x, y = self.selected_coords
         self._call_add_calibration_point(x, y, self.current_raw_value, reference_temp)
         
-        # Add point to image view
-        self.image_view.add_calibration_point(x, y, reference_temp)
+        # Add point to image view with raw value
+        self.image_view.add_calibration_point(x, y, reference_temp, self.current_raw_value)
         
         # Reset UI state
         self.temp_input_widget.setVisible(False)
@@ -1051,6 +1072,16 @@ class ThermalCalibrationPlugin(PyPlugin):
         """Restore the intrinsic configuration of the plugin."""
         # You can restore intrinsic configuration here
         pass
+    
+    def resizeEvent(self, event):
+        """Handle resize events."""
+        super(ThermalCalibrationPlugin, self).resizeEvent(event)
+        
+        # Request update of image display
+        if hasattr(self, 'has_8bit_stream') and self.has_8bit_stream and hasattr(self, 'last_8bit_image'):
+            self._update_image_display(self.last_8bit_image)
+        elif hasattr(self, 'current_image') and self.current_image is not None:
+            self._update_display_from_16bit()
 
 
 def main(args=None):

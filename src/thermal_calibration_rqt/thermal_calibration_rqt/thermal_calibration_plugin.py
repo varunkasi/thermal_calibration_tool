@@ -1055,9 +1055,16 @@ class ThermalCalibrationPlugin(PyPlugin):
 
 def main(args=None):
     """Main function to allow standalone operation of the plugin."""
-    # For standalone use, we need to initialize ROS here, but
-    # when run as an RQT plugin, this initialization is done by RQT
+    # Initialize ROS
     rclpy.init(args=args)
-    from rqt_gui.main import Main
+    
+    # Create a simple node for the plugin
+    node = rclpy.create_node('thermal_calibration_rqt_node')
+    
+    # Create the plugin
+    from qt_gui.main import Main
     main = Main()
-    sys.exit(main.main(sys.argv, standalone='thermal_calibration_rqt.thermal_calibration_plugin:ThermalCalibrationPlugin'))
+    sys.exit(main.main(args=args, standalone='thermal_calibration_rqt.thermal_calibration_plugin:ThermalCalibrationPlugin'))
+
+if __name__ == '__main__':
+    main()

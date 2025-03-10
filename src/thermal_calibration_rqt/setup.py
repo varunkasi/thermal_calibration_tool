@@ -14,7 +14,6 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name, ['plugin.xml']),
         ('share/' + package_name + '/resource', ['resource/thermal_calibration.perspective']),
-        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

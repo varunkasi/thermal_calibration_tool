@@ -278,17 +278,14 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.temp_input.setRange(-50.0, 500.0)
         self.temp_input.setDecimals(1)
         self.temp_input.setSuffix(" °C")
-        self.temp_input.setKeyboardTracking(True)  # Update value immediately on typing
         self.temp_input_layout.addWidget(self.temp_input)
         
         self.save_temp_btn = QPushButton("Save")
         self.save_temp_btn.clicked.connect(self._on_save_temp_clicked)
         self.temp_input_layout.addWidget(self.save_temp_btn)
         
-        # Cancel button with reload icon
-        self.cancel_temp_btn = QPushButton()
-        self.cancel_temp_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
-        self.cancel_temp_btn.setToolTip("Cancel")
+        # Simple text cancel button
+        self.cancel_temp_btn = QPushButton("Cancel")
         self.cancel_temp_btn.clicked.connect(self._on_cancel_temp_clicked)
         self.temp_input_layout.addWidget(self.cancel_temp_btn)
         

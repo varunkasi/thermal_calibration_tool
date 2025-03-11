@@ -1300,12 +1300,38 @@ class ThermalCalibrationPlugin(PyPlugin):
                 self._node.get_logger().debug(f'Service call for add_calibration_point({point_id}) already pending')
                 return
         
+        # Make sure the values are of the correct type
+        x_int = int(x)
+        y_int = int(y)
+        
+        # Ensure raw_value is a 16-bit integer (0-65535)
+        try:
+            raw_value_int = int(raw_value) if raw_value is not None else 0
+            # Check if it's within 16-bit range
+            if raw_value_int < 0 or raw_value_int > 65535:
+                self._node.get_logger().warn(f'Raw value {raw_value_int} is outside 16-bit range (0-65535), clamping')
+                raw_value_int = max(0, min(65535, raw_value_int))
+        except (TypeError, ValueError) as e:
+            self._node.get_logger().error(f'Error converting raw value to integer: {e}')
+            raw_value_int = 0  # Default to 0 if conversion fails
+        
+        # Ensure reference_temp is a float with 1 decimal precision
+        try:
+            # Round to 1 decimal place
+            reference_temp_float = round(float(reference_temp), 1)
+        except (TypeError, ValueError) as e:
+            self._node.get_logger().error(f'Error converting reference temperature to float: {e}')
+            reference_temp_float = 0.0  # Default to 0.0 if conversion fails
+        
+        # Log the values for debugging
+        self._node.get_logger().info(f'Adding calibration point: x={x_int}, y={y_int}, raw_value={raw_value_int}, temp={reference_temp_float}')
+        
         # Proceed with service call
         request = AddCalibrationPoint.Request()
-        request.x = x
-        request.y = y
-        request.raw_value = raw_value
-        request.reference_temp = reference_temp
+        request.x = x_int  # Pixel x-coordinate (integer)
+        request.y = y_int  # Pixel y-coordinate (integer)
+        request.raw_value = raw_value_int  # 16-bit integer (0-65535)
+        request.reference_temp = reference_temp_float  # Float with 1 decimal precision
         
         try:
             future = self.add_calibration_point_client.call_async(request)

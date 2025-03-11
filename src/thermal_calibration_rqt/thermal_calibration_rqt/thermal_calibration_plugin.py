@@ -721,13 +721,13 @@ class ThermalCalibrationPlugin(PyPlugin):
                 colored_img = cv2.applyColorMap(display_img, cv2.COLORMAP_INFERNO)
                 self.signal_helper.image_update_signal.emit(colored_img)
             
-            # If we have selected coordinates, update the raw value ONLY if we don't have one already
-            # This prevents overwriting values with new frames
+            # If we have selected coordinates but no raw value yet, try to get it from the current frame
+            # Do NOT update if we already have a raw value - this prevents overwriting with values from new frames
             if hasattr(self, 'selected_coords') and self.selected_coords:
                 x, y = self.selected_coords
                 coord_key = f"{x},{y}"
                 
-                # If this coordinate hasn't been processed yet, get its raw value
+                # Only update if we haven't processed this coordinate yet
                 if coord_key not in self.last_raw_values and 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
                     # Get raw value from current frame and store it
                     current_raw = int(self.current_image[y, x])
@@ -848,21 +848,38 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Enable the button to enter temperature
             self.enter_temp_btn.setEnabled(True)
             
-            # Try to get raw value using service call instead of direct image access
-            # This will be more robust against frame updates
+            # Immediately read the raw value from the current frame if available
+            # This ensures we capture the value from the exact frame the user clicked on
+            raw_value = None
+            if self.current_image is not None:
+                try:
+                    if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
+                        raw_value = int(self.current_image[y, x])
+                        self._node.get_logger().info(f'Immediate raw value from image: {raw_value}')
+                        
+                        # Store the raw value securely for this coordinate
+                        coord_key = f"{x},{y}"
+                        self.last_raw_values[coord_key] = raw_value
+                        
+                        # Set as current raw value and update UI
+                        self.current_raw_value = raw_value
+                        self.signal_helper.raw_value_update_signal.emit(f"Raw value: {raw_value}")
+                except Exception as e:
+                    self._node.get_logger().error(f'Error reading immediate raw value: {e}')
+            
+            # Also call the service to get a possibly more accurate value, but
+            # we'll keep the immediate value as a backup
             self._call_get_raw_value(x, y)
             
-            # If we already have raw value for these coordinates in our cache, use it immediately
-            # while waiting for the service response
-            coord_key = f"{x},{y}"
-            if coord_key in self.last_raw_values:
+            # If we don't have an immediate value but have a cached one, use it
+            if raw_value is None and coord_key in self.last_raw_values:
                 cached_raw = self.last_raw_values[coord_key]
                 self.current_raw_value = cached_raw
                 self.signal_helper.raw_value_update_signal.emit(f"Raw value: {cached_raw}")
                 
-                # Update temperature display if in radiometric mode
-                if self.radiometric_mode and self.calibration_model:
-                    self._update_temperature_display(cached_raw)
+            # Update temperature display if in radiometric mode
+            if self.radiometric_mode and self.calibration_model and self.current_raw_value is not None:
+                self._update_temperature_display(self.current_raw_value)
     
     def _update_temperature_display(self, raw_value):
         """Update the temperature display for a given raw value using the current calibration model."""
@@ -913,8 +930,26 @@ class ThermalCalibrationPlugin(PyPlugin):
             QMessageBox.warning(self._widget, "No Selection", 
                             "Please select a point on the image first.")
             return
-            
-        if not hasattr(self, 'current_raw_value') or self.current_raw_value is None:
+        
+        # Check for raw value in a more robust way
+        raw_value = None
+        x, y = self.selected_coords
+        coord_key = f"{x},{y}"
+        
+        # Try to get raw value from multiple sources
+        if hasattr(self, 'current_raw_value') and self.current_raw_value is not None:
+            raw_value = self.current_raw_value
+        elif coord_key in self.last_raw_values:
+            raw_value = self.last_raw_values[coord_key]
+        elif self.current_image is not None:
+            try:
+                if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
+                    raw_value = int(self.current_image[y, x])
+                    self._node.get_logger().info(f'Using immediate raw value from current image: {raw_value}')
+            except Exception as e:
+                self._node.get_logger().error(f'Error reading raw value from current image: {e}')
+        
+        if raw_value is None:
             QMessageBox.warning(self._widget, "No Raw Value", 
                             "Raw value is not available. Please try selecting the point again.")
             return
@@ -930,10 +965,6 @@ class ThermalCalibrationPlugin(PyPlugin):
             reference_temp = self.temp_input.value()
             
             # Add calibration point using stored coordinates and raw value
-            x, y = self.selected_coords
-            raw_value = self.current_raw_value
-            
-            # Store point locally first for immediate feedback
             point_id = len(self.calibration_points) + 1
             new_point = {
                 'id': point_id,
@@ -1261,21 +1292,25 @@ class ThermalCalibrationPlugin(PyPlugin):
         try:
             response = future.result()
             if response.success:
-                # Store the raw value persistently
-                self.current_raw_value = response.raw_value
-                
-                # Also cache it by coordinates for future reference
+                # Store the raw value persistently, but don't overwrite an existing value
+                # unless it's for the currently selected coordinates
                 if hasattr(self, 'selected_coords') and self.selected_coords:
                     x, y = self.selected_coords
                     coord_key = f"{x},{y}"
+                    
+                    # Add to our cached values
                     self.last_raw_values[coord_key] = response.raw_value
-                
-                # Update UI
-                self.signal_helper.raw_value_update_signal.emit(f"Raw value: {response.raw_value}")
-                
-                # Update temperature if in radiometric mode
-                if self.radiometric_mode and self.calibration_model:
-                    self._update_temperature_display(response.raw_value)
+                    
+                    # Only update current_raw_value if it's for the currently selected point
+                    if self.selected_coords == (x, y):
+                        self.current_raw_value = response.raw_value
+                        # Update UI
+                        self.signal_helper.raw_value_update_signal.emit(f"Raw value: {response.raw_value}")
+                        
+                        # Update temperature if in radiometric mode
+                        if self.radiometric_mode and self.calibration_model:
+                            self._update_temperature_display(response.raw_value)
+            
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
     

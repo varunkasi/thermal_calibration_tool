@@ -34,7 +34,6 @@ from thermal_calibration_interfaces.srv import (
     RawToTemperature, SaveCalibrationModel, LoadCalibrationModel
 )
 
-# Add this after your imports, before the ThermalImageView class
 class SignalHelper(QObject):
     """Helper class to hold Qt signals."""
     image_update_signal = pyqtSignal(object)
@@ -42,6 +41,9 @@ class SignalHelper(QObject):
     temp_update_signal = pyqtSignal(str)
     points_table_update_signal = pyqtSignal()
     cal_results_update_signal = pyqtSignal()
+    # Add this new signal
+    timer_cleanup_signal = pyqtSignal(str)
+    calibration_complete_signal = pyqtSignal(object)  # For calibration done with future
 
 class ThermalImageOverlay(QWidget):
     """
@@ -402,7 +404,11 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.signal_helper.temp_update_signal.connect(self._update_temp_label)
         self.signal_helper.points_table_update_signal.connect(self._update_points_table)
         self.signal_helper.cal_results_update_signal.connect(self._update_calibration_results)
-        
+
+        # after connecting the other signals:
+        self.signal_helper.timer_cleanup_signal.connect(self._cleanup_timer_main_thread)
+        self.signal_helper.calibration_complete_signal.connect(self._handle_calibration_complete) 
+
         # Initialize UI
         self._init_ui()
         
@@ -1038,110 +1044,129 @@ class ThermalCalibrationPlugin(PyPlugin):
             self.enter_temp_btn.setEnabled(True)
 
     def _save_temperature_value(self):
-        """Save the entered temperature value with the current pixel."""
-        with QMutexLocker(self.raw_value_mutex):
-            selected_coords = self.selected_coords
-            current_raw_value = self.current_raw_value
-        
-        self._node.get_logger().info(f'Selected coordinates: {selected_coords}')
-        self._node.get_logger().info(f'Current raw value: {current_raw_value}')
-        
-        if selected_coords is None:
-            QMessageBox.warning(self._widget, "No Selection", 
-                            "Please select a point on the image first.")
+        """Save the entered temperature value with the current pixel.
+        This is a method of the ThermalCalibrationPlugin class."""
+        # Check if save is already in progress to prevent duplicates
+        if hasattr(self, '_save_in_progress') and self._save_in_progress:
+            self._node.get_logger().info("Save operation already in progress, ignoring duplicate call")
             return
-            
-        # Get reference temperature from input
-        reference_temp = self.temp_input.value()
         
-        # Check for raw value - try all possible sources
-        raw_value = None
-        x, y = selected_coords
-        coord_key = f"{x},{y}"
+        # Set flag to prevent duplicate saves
+        self._save_in_progress = True
         
-        # Thread-safe access to raw values
-        with QMutexLocker(self.raw_value_mutex):
-            # First try current_raw_value
-            if current_raw_value is not None:
-                raw_value = current_raw_value
-            # Then check cached values
-            elif coord_key in self.last_raw_values:
-                raw_value = self.last_raw_values[coord_key]
-                self._node.get_logger().info(f'Using cached raw value for {coord_key}: {raw_value}')
-            else:
-                self._node.get_logger().warn(f'No cached raw value for {coord_key}')
-        
-        # If still no value, try reading from the current image directly
-        if raw_value is None:
-            try:
-                with QMutexLocker(self.image_mutex):
-                    if self.current_image is not None:
-                        if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                            raw_value = int(self.current_image[y, x])
-                            self._node.get_logger().info(f'Read raw value directly from image: {raw_value}')
-                    else:
-                        self._node.get_logger().warn('No current image available')
-            except Exception as e:
-                self._node.get_logger().error(f'Error reading from image: {e}')
-        
-        # Use 0 as a last resort if we still don't have a raw value
-        if raw_value is None:
-            raw_value = 0  # Default to 0 if no value could be retrieved
-            self._node.get_logger().warn(f'Using default raw value 0 as a fallback')
-        
-        # Add calibration point using stored coordinates and raw value
         try:
-            # IMPORTANT: Removed duplicate point check here - let the backend handle it
-            # Store point locally for immediate feedback
-            point_id = len(self.calibration_points) + 1
-            new_point = {
-                'id': point_id,
-                'x': x,
-                'y': y,
-                'raw_value': raw_value,
-                'reference_temp': reference_temp,
-                'timestamp': datetime.now().isoformat()
-            }
+            with QMutexLocker(self.raw_value_mutex):
+                selected_coords = self.selected_coords
+                current_raw_value = self.current_raw_value
             
-            # Add to local model
-            self.calibration_points.append(new_point)
+            self._node.get_logger().info(f'Selected coordinates: {selected_coords}')
+            self._node.get_logger().info(f'Current raw value: {current_raw_value}')
             
-            # Update UI
-            self._update_points_table()
+            if selected_coords is None:
+                QMessageBox.warning(self._widget, "No Selection", 
+                                "Please select a point on the image first.")
+                return
+                
+            # Get reference temperature from input
+            reference_temp = self.temp_input.value()
             
-            # Add point to image view
+            # Check for raw value - try all possible sources
+            raw_value = None
+            x, y = selected_coords
+            coord_key = f"{x},{y}"
+            
+            # Thread-safe access to raw values
+            with QMutexLocker(self.raw_value_mutex):
+                # First try current_raw_value
+                if current_raw_value is not None:
+                    raw_value = current_raw_value
+                # Then check cached values
+                elif coord_key in self.last_raw_values:
+                    raw_value = self.last_raw_values[coord_key]
+                    self._node.get_logger().info(f'Using cached raw value for {coord_key}: {raw_value}')
+                else:
+                    self._node.get_logger().warn(f'No cached raw value for {coord_key}')
+            
+            # If still no value, try reading from the current image directly
+            if raw_value is None:
+                try:
+                    with QMutexLocker(self.image_mutex):
+                        if self.current_image is not None:
+                            if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
+                                raw_value = int(self.current_image[y, x])
+                                self._node.get_logger().info(f'Read raw value directly from image: {raw_value}')
+                        else:
+                            self._node.get_logger().warn('No current image available')
+                except Exception as e:
+                    self._node.get_logger().error(f'Error reading from image: {e}')
+            
+            # Use 0 as a last resort if we still don't have a raw value
+            if raw_value is None:
+                raw_value = 0  # Default to 0 if no value could be retrieved
+                self._node.get_logger().warn(f'Using default raw value 0 as a fallback')
+            
+            # Add calibration point using stored coordinates and raw value
             try:
-                self.image_view.add_calibration_point(x, y, reference_temp, raw_value)
+                # IMPORTANT: Removed duplicate point check here - let the backend handle it
+                # Store point locally for immediate feedback
+                point_id = len(self.calibration_points) + 1
+                new_point = {
+                    'id': point_id,
+                    'x': x,
+                    'y': y,
+                    'raw_value': raw_value,
+                    'reference_temp': reference_temp,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Add to local model
+                self.calibration_points.append(new_point)
+                
+                # Update UI
+                self._update_points_table()
+                
+                # Add point to image view
+                try:
+                    self.image_view.add_calibration_point(x, y, reference_temp, raw_value)
+                except Exception as e:
+                    self._node.get_logger().error(f'Error adding point to image view: {e}')
+                
+                # Call service to add the calibration point
+                self._call_add_calibration_point(x, y, raw_value, reference_temp)
+                
+                self._node.get_logger().info(f'Added calibration point: {new_point}')
+            
+                # Hide temperature input controls and re-enable enter button regardless
+                self.temp_input_widget.setVisible(False)
+                self.enter_temp_btn.setEnabled(True)  
+                
+                # Enable remove last button if we have points
+                self.remove_last_btn.setEnabled(len(self.calibration_points) > 0)
+                
             except Exception as e:
-                self._node.get_logger().error(f'Error adding point to image view: {e}')
-            
-            # Call service to add the calibration point
-            self._call_add_calibration_point(x, y, raw_value, reference_temp)
-            
-            self._node.get_logger().info(f'Added calibration point: {new_point}')
+                self._node.get_logger().error(f'Error saving temperature: {e}')
+                self._node.get_logger().error(traceback.format_exc())
+                QMessageBox.critical(self._widget, "Error", 
+                                    f"Failed to save temperature: {str(e)}")
+                
+                # Ensure temperature input is hidden and enter button is re-enabled
+                # even if an error occurs
+                self.temp_input_widget.setVisible(False)
+                self.enter_temp_btn.setEnabled(True)
         
-            # Hide temperature input controls and re-enable enter button regardless
-            self.temp_input_widget.setVisible(False)
-            self.enter_temp_btn.setEnabled(True)  
-            
-            # Enable remove last button if we have points
-            self.remove_last_btn.setEnabled(len(self.calibration_points) > 0)
-            
-        except Exception as e:
-            self._node.get_logger().error(f'Error saving temperature: {e}')
-            self._node.get_logger().error(traceback.format_exc())
-            QMessageBox.critical(self._widget, "Error", 
-                                f"Failed to save temperature: {str(e)}")
-            
-            # Ensure temperature input is hidden and enter button is re-enabled
-            # even if an error occurs
-            self.temp_input_widget.setVisible(False)
-            self.enter_temp_btn.setEnabled(True)
+        finally:
+            # Clear the flag regardless of success or failure
+            self._save_in_progress = False
 
     def _on_save_temp_clicked(self):
-        """Handle click on save temperature button."""
-        # Disconnect the editing finished signal temporarily to prevent double-saving
-        self.temp_input.editingFinished.disconnect(self._on_temp_input_editing_finished)
+        """Handle click on save temperature button.
+        This is a method of the ThermalCalibrationPlugin class."""
+        # Disconnect the editing finished signal first to definitely prevent double-saving
+        try:
+            self.temp_input.editingFinished.disconnect(self._on_temp_input_editing_finished)
+        except (TypeError, RuntimeError):
+            # Already disconnected or signal not connected
+            pass
         
         try:
             # Commit any partial edits
@@ -1152,7 +1177,11 @@ class ThermalCalibrationPlugin(PyPlugin):
             self._save_temperature_value()
         finally:
             # Reconnect the signal
-            self.temp_input.editingFinished.connect(self._on_temp_input_editing_finished)
+            try:
+                self.temp_input.editingFinished.connect(self._on_temp_input_editing_finished)
+            except (TypeError, RuntimeError):
+                # Already connected
+                pass
 
     def _on_cancel_temp_clicked(self):
         """Handle click on cancel temperature button."""
@@ -1390,26 +1419,22 @@ class ThermalCalibrationPlugin(PyPlugin):
     # Service call methods
 
     def _track_service_call(self, service_name, identifier, future):
-        """Track a service call to prevent race conditions and handle timeouts."""
+        """Track a service call to prevent race conditions and handle timeouts.
+        This is a method of the ThermalCalibrationPlugin class."""
         key = f"{service_name}:{identifier}"
         
         with QMutexLocker(self.service_mutex):
             self.pending_service_calls[key] = future
         
         def cleanup_callback(future_result):
-            # Remove from pending calls when done
+            # Use signal to perform timer cleanup in main thread
+            timer_key = key + "_timer"
+            self.signal_helper.timer_cleanup_signal.emit(timer_key)
+            
+            # Remove service call from tracking
             with QMutexLocker(self.service_mutex):
                 if key in self.pending_service_calls:
                     del self.pending_service_calls[key]
-                    
-                    # Clear any associated timeout timer
-                    timer_key = key + "_timer"
-                    if timer_key in self.pending_service_calls:
-                        timer = self.pending_service_calls[timer_key]
-                        if timer.isActive():
-                            timer.stop()
-                        del self.pending_service_calls[timer_key]
-                    
                     self._node.get_logger().debug(f'Service call {key} completed and removed from tracking')
         
         # Add cleanup callback
@@ -1636,7 +1661,8 @@ class ThermalCalibrationPlugin(PyPlugin):
             self.service_status_label.setText("Service Connection Issues")
 
     def _call_perform_calibration(self, model_type, degree):
-        """Call the perform_calibration service with tracking."""
+        """Call the perform_calibration service with tracking.
+        This is a method of the ThermalCalibrationPlugin class."""
         if not self.perform_calibration_client.service_is_ready():
             self._node.get_logger().warn('perform_calibration service not available')
             self._update_service_status_indicators(False)
@@ -1656,37 +1682,42 @@ class ThermalCalibrationPlugin(PyPlugin):
                                     "Calibration is already in progress. Please wait.")
                 return
         
+        # Disable UI immediately for better responsiveness
+        self.calibrate_btn.setEnabled(False)
+        self.calibrate_btn.setText("Calibrating...")
+        
+        # Create progress dialog immediately
+        self.calibration_progress = QProgressDialog("Performing calibration...", "Cancel", 0, 0, self._widget)
+        self.calibration_progress.setWindowModality(Qt.WindowModal)
+        self.calibration_progress.setMinimumDuration(500)  # Show after 500ms
+        self.calibration_progress.setCancelButton(None)  # Hide cancel button
+        self.calibration_progress.setWindowTitle("Calibration")
+        self.calibration_progress.show()
+        
         # Proceed with service call
         request = PerformCalibration.Request()
         request.model_type = model_type
         request.degree = degree
         
         try:
-            # Create progress dialog
-            self.calibration_progress = QProgressDialog("Performing calibration...", "Cancel", 0, 0, self._widget)
-            self.calibration_progress.setWindowModality(Qt.WindowModal)
-            self.calibration_progress.setMinimumDuration(500)  # Show after 500ms
-            self.calibration_progress.setCancelButton(None)  # Hide cancel button
-            self.calibration_progress.setWindowTitle("Calibration")
-            self.calibration_progress.show()
-            
-            # Make service call
             future = self.perform_calibration_client.call_async(request)
+            
+            # Use signal to handle completion in the main thread
+            def completion_callback(future):
+                self.signal_helper.calibration_complete_signal.emit(future)
+            
+            future.add_done_callback(completion_callback)
+            
             # Track this call
             self._track_service_call("perform_calibration", call_id, future)
-            future.add_done_callback(self._perform_calibration_done)
             
-            # Disable the calibrate button while processing
-            self.calibrate_btn.setEnabled(False)
-            self.calibrate_btn.setText("Calibrating...")
-            
-            # Set up a timeout timer to re-enable the button if the service call takes too long
+            # Set up a timeout timer
             calibration_timeout = QTimer(self._widget)
             calibration_timeout.setSingleShot(True)
             calibration_timeout.timeout.connect(lambda: self._handle_service_timeout(call_key, "calibration"))
             calibration_timeout.start(15000)  # 15 second timeout
             
-            # Store the timer in a dictionary to manage it
+            # Store the timer
             with QMutexLocker(self.service_mutex):
                 self.pending_service_calls[call_key + "_timer"] = calibration_timeout
                 
@@ -1738,6 +1769,46 @@ class ThermalCalibrationPlugin(PyPlugin):
                 }
                 
                 # Update UI via signal
+                self.signal_helper.cal_results_update_signal.emit()
+                QMessageBox.information(self._widget, "Success", response.message)
+            else:
+                QMessageBox.warning(self._widget, "Calibration Error", response.message)
+        except Exception as e:
+            self._node.get_logger().error(f'Service call failed: {e}')
+            QMessageBox.critical(self._widget, "Error", f"Service call failed: {e}")
+            
+            # Update service status to indicate problem
+            self._update_service_status_indicators(False)
+
+    def _handle_calibration_complete(self, future):
+        """Handle calibration service completion in the main thread.
+        This is a method of the ThermalCalibrationPlugin class."""
+        # Re-enable the calibrate button
+        self.calibrate_btn.setEnabled(True)
+        self.calibrate_btn.setText("Calibrate")
+        
+        # Hide the progress dialog if it exists
+        if hasattr(self, 'calibration_progress') and self.calibration_progress:
+            self.calibration_progress.hide()
+        
+        try:
+            response = future.result()
+            
+            # Update service status
+            self._update_service_status_indicators(True)
+            
+            if response.success:
+                # Store calibration model
+                self.calibration_model = {
+                    'model_type': self.model_type_combo.currentText().lower(),
+                    'degree': int(self.degree_spin.value()),
+                    'parameters': list(response.model_parameters),
+                    'r_squared': response.r_squared,
+                    'rmse': response.rmse,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Update UI
                 self.signal_helper.cal_results_update_signal.emit()
                 QMessageBox.information(self._widget, "Success", response.message)
             else:
@@ -2185,12 +2256,29 @@ class ThermalCalibrationPlugin(PyPlugin):
                 self._node.get_logger().error(f"Error during plugin shutdown: {e}")
 
     def _on_temp_input_editing_finished(self):
-        """Handle when user presses Enter in the temperature input field."""
-        # Only trigger save if the temperature input widget is visible AND 
-        # this wasn't triggered by the save button
-        if self.temp_input_widget.isVisible() and not self.temp_input.hasFocus():
+        """Handle when user presses Enter in the temperature input field.
+        This is a method of the ThermalCalibrationPlugin class."""
+        # Only trigger save if the temperature input widget is visible,
+        # this wasn't triggered by the save button, and save isn't already in progress
+        if (self.temp_input_widget.isVisible() and 
+                not self.temp_input.hasFocus() and 
+                not (hasattr(self, '_save_in_progress') and self._save_in_progress)):
             self._node.get_logger().info("Temperature input editing finished - committing value")
             self._save_temperature_value()
+
+    def _cleanup_timer_main_thread(self, timer_key):
+        """Handle timer cleanup in the main thread.
+        This is a method of the ThermalCalibrationPlugin class."""
+        try:
+            with QMutexLocker(self.service_mutex):
+                if timer_key in self.pending_service_calls:
+                    timer = self.pending_service_calls[timer_key]
+                    if timer.isActive():
+                        timer.stop()
+                    del self.pending_service_calls[timer_key]
+                    self._node.get_logger().debug(f'Timer {timer_key} cleaned up')
+        except Exception as e:
+            self._node.get_logger().error(f'Error cleaning up timer {timer_key}: {e}')
 
 
 def main(args=None):

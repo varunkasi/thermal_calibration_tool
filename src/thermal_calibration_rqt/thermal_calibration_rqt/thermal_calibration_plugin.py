@@ -602,7 +602,21 @@ class ThermalCalibrationPlugin(PyPlugin):
         calibration_layout.addLayout(cal_results_layout)
         
         right_layout.addWidget(calibration_group)
+
+        # Add service status indicator
+        self.service_status_layout = QHBoxLayout()
+        self.service_status_indicator = QLabel()
+        self.service_status_indicator.setFixedSize(16, 16)
+        self.service_status_indicator.setStyleSheet("background-color: gray; border-radius: 8px;")
+        self.service_status_layout.addWidget(self.service_status_indicator)
         
+        self.service_status_label = QLabel("Checking services...")
+        self.service_status_layout.addWidget(self.service_status_label)
+        self.service_status_layout.addStretch(1)
+        
+        # Add the status layout to the bottom of the right panel
+        right_layout.addLayout(self.service_status_layout)
+
         # Add panels to splitter
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
@@ -612,20 +626,33 @@ class ThermalCalibrationPlugin(PyPlugin):
         
     def _setup_ros_communication(self):
         """Set up ROS subscribers and service clients."""
-        # Image subscribers for both 16-bit and 8-bit thermal streams
+        # Create QoS profile for lower rate image subscription
+        image_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,  # Change to BEST_EFFORT for image streams
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1  # Only keep the latest message
+        )
+        
+        # Image subscribers for both 16-bit and 8-bit thermal streams with lower rate
         self.image_16bit_sub = self._node.create_subscription(
             Image,
-            'image_raw',  # 16-bit thermal image used for calibration (30 fps)
+            'image_raw',  # 16-bit thermal image used for calibration
             self._image_16bit_callback,
-            10
+            image_qos  # Use our custom QoS profile
         )
         
         self.image_8bit_sub = self._node.create_subscription(
             Image,
-            'image_raw/mono8',  # 8-bit visualization stream (2 fps)
+            'image_raw/mono8',  # 8-bit visualization stream
             self._image_8bit_callback,
-            10
+            image_qos  # Use our custom QoS profile
         )
+        
+        # Initialize frame buffer variables
+        self.last_frame_timestamp = 0
+        self.frame_buffer_interval = 0.2  # Process frames at ~5 fps (200ms interval)
+        self.buffered_16bit_image = None
+        self.buffered_8bit_image = None
         
         # Service clients
         self.get_raw_value_client = self._node.create_client(
@@ -726,26 +753,41 @@ class ThermalCalibrationPlugin(PyPlugin):
                 self._node.get_logger().debug("Plugin is not visible, reducing update frequency")
         
     def _image_16bit_callback(self, msg):
-        """Callback for 16-bit thermal image used for calibration."""
+        """Callback for 16-bit thermal image with rate limiting."""
+        current_time = time.time()
+        
+        # Store this frame in the buffer regardless of timing
         try:
-            # Convert ROS image message to OpenCV image
             with QMutexLocker(self.image_mutex):
-                self.current_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono16")
-                self._node.get_logger().debug(f"Received 16-bit image: {self.current_image.shape}")
-                # Set a flag to indicate we have a valid image
+                self.buffered_16bit_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono16")
+                # Make this the current image as well
+                self.current_image = self.buffered_16bit_image.copy()
                 self.has_valid_current_image = True
-                # Store the timestamp for debugging
-                self.last_16bit_timestamp = time.time()
+                self.last_16bit_timestamp = current_time
+        except Exception as e:
+            self._node.get_logger().error(f'Error buffering 16-bit image: {e}')
+            return
             
-            # Process this image for display if we don't have an 8-bit stream
-            if not hasattr(self, 'has_8bit_stream') or not self.has_8bit_stream:
-                # Instead of directly updating the display, emit signal for main thread to handle
+        # Only process this frame for display if enough time has passed since the last one
+        # This effectively reduces the processing rate regardless of incoming frame rate
+        if current_time - self.last_frame_timestamp < self.frame_buffer_interval:
+            return  # Skip processing this frame to maintain our lower rate
+            
+        # Update timestamp since we're processing this frame
+        self.last_frame_timestamp = current_time
+        
+        # Process image for display if we don't have an 8-bit stream
+        if not hasattr(self, 'has_8bit_stream') or not self.has_8bit_stream:
+            try:
                 with QMutexLocker(self.image_mutex):
                     display_img = cv2.normalize(self.current_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                     colored_img = cv2.applyColorMap(display_img, cv2.COLORMAP_INFERNO)
                 self.signal_helper.image_update_signal.emit(colored_img)
-            
-            # Thread-safe check for selected coordinates
+            except Exception as e:
+                self._node.get_logger().error(f'Error processing image for display: {e}')
+        
+        # Process selected coordinates if any
+        try:
             selected_coords = None
             current_raw_value = None
             with QMutexLocker(self.raw_value_mutex):
@@ -782,29 +824,44 @@ class ThermalCalibrationPlugin(PyPlugin):
                                         
                                         # Also call the service to get a more reliable value
                                         self._call_get_raw_value(x, y)
-        
         except Exception as e:
-            self._node.get_logger().error(f'Error processing 16-bit image: {e}')
-            self._node.get_logger().error(traceback.format_exc())
+            self._node.get_logger().error(f'Error processing selected coordinates: {e}')
 
     def _image_8bit_callback(self, msg):
-        """Callback for 8-bit thermal image used for visualization."""
+        """Callback for 8-bit thermal image with rate limiting."""
+        current_time = time.time()
+        
+        # Set flag that we have 8-bit stream
+        self.has_8bit_stream = True
+        
+        # Store this frame in the buffer regardless of timing
         try:
-            # Set flag that we have 8-bit stream
-            self.has_8bit_stream = True
+            # Convert ROS image message to OpenCV image and store in buffer
+            self.buffered_8bit_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono8")
+            # Store the timestamp
+            self.last_8bit_timestamp = current_time
+        except Exception as e:
+            self._node.get_logger().error(f'Error buffering 8-bit image: {e}')
+            return
             
-            # Convert ROS image message to OpenCV image
-            img_8bit = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono8")
+        # Only process this frame for display if enough time has passed since the last one
+        if current_time - self.last_frame_timestamp < self.frame_buffer_interval:
+            return  # Skip processing this frame to maintain our lower rate
             
-            # Store the image for colormap changes
-            self.last_8bit_image = img_8bit.copy()
+        # Update timestamp since we're processing this frame
+        self.last_frame_timestamp = current_time
+        
+        try:
+            # Store a copy for colormap changes
+            img_8bit = self.buffered_8bit_image.copy()
+            self.last_8bit_image = img_8bit
             
-            # Apply colormap (moved from _update_image_display)
+            # Apply colormap
             if not hasattr(self, 'current_colormap'):
                 self.current_colormap = "Grayscale"
                 
             if self.current_colormap == "Grayscale":
-                # For grayscale, we don't apply a colormap, but convert to RGB
+                # For grayscale, don't apply a colormap, just convert to RGB
                 colored_img = cv2.cvtColor(img_8bit, cv2.COLOR_GRAY2BGR)
             else:
                 # Map colormap name to OpenCV constant
@@ -822,7 +879,29 @@ class ThermalCalibrationPlugin(PyPlugin):
         
         except Exception as e:
             self._node.get_logger().error(f'Error processing 8-bit image: {e}')
-            self._node.get_logger().error(traceback.format_exc())
+
+    def _get_current_raw_value_from_buffer(self, x, y):
+        """Get the raw value at coordinates from the latest buffered image."""
+        raw_value = None
+        
+        with QMutexLocker(self.image_mutex):
+            # First try the current image
+            if self.current_image is not None:
+                if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
+                    raw_value = int(self.current_image[y, x])
+                    self._node.get_logger().info(f'Got raw value from current image: {raw_value}')
+                    return raw_value
+                    
+            # If that fails, try the buffer
+            if self.buffered_16bit_image is not None:
+                if 0 <= y < self.buffered_16bit_image.shape[0] and 0 <= x < self.buffered_16bit_image.shape[1]:
+                    raw_value = int(self.buffered_16bit_image[y, x])
+                    self._node.get_logger().info(f'Got raw value from buffered image: {raw_value}')
+                    return raw_value
+        
+        # If we get here, we couldn't get a raw value
+        self._node.get_logger().warn(f'Could not get raw value for coordinates ({x}, {y})')
+        return None
 
     def _update_image_display(self, colored_img):
         """Update the image display with the given colored image."""
@@ -1011,49 +1090,35 @@ class ThermalCalibrationPlugin(PyPlugin):
         
         # Add calibration point using stored coordinates and raw value
         try:
-            # Check for duplicates more carefully
-            duplicate_found = False
-            for point in self.calibration_points:
-                if (point['x'] == x and 
-                    point['y'] == y and 
-                    abs(point['reference_temp'] - reference_temp) < 0.001):
-                    duplicate_found = True
-                    self._node.get_logger().warn(f"Duplicate point detected: ({x}, {y}) at {reference_temp}°C")
-                    
-                    # Show a warning to the user
-                    QMessageBox.warning(self._widget, "Duplicate Point", 
-                                    f"A point at ({x}, {y}) with temperature {reference_temp}°C already exists.")
-                    break
-                    
-            if not duplicate_found:
-                # Store point locally for immediate feedback
-                point_id = len(self.calibration_points) + 1
-                new_point = {
-                    'id': point_id,
-                    'x': x,
-                    'y': y,
-                    'raw_value': raw_value,
-                    'reference_temp': reference_temp,
-                    'timestamp': datetime.now().isoformat()
-                }
-                
-                # Add to local model
-                self.calibration_points.append(new_point)
-                
-                # Update UI
-                self._update_points_table()
-                
-                # Add point to image view
-                try:
-                    self.image_view.add_calibration_point(x, y, reference_temp, raw_value)
-                except Exception as e:
-                    self._node.get_logger().error(f'Error adding point to image view: {e}')
-                
-                # Call service to add the calibration point ONLY if not a duplicate
-                self._call_add_calibration_point(x, y, raw_value, reference_temp)
-                
-                self._node.get_logger().info(f'Added calibration point: {new_point}')
+            # IMPORTANT: Removed duplicate point check here - let the backend handle it
+            # Store point locally for immediate feedback
+            point_id = len(self.calibration_points) + 1
+            new_point = {
+                'id': point_id,
+                'x': x,
+                'y': y,
+                'raw_value': raw_value,
+                'reference_temp': reference_temp,
+                'timestamp': datetime.now().isoformat()
+            }
             
+            # Add to local model
+            self.calibration_points.append(new_point)
+            
+            # Update UI
+            self._update_points_table()
+            
+            # Add point to image view
+            try:
+                self.image_view.add_calibration_point(x, y, reference_temp, raw_value)
+            except Exception as e:
+                self._node.get_logger().error(f'Error adding point to image view: {e}')
+            
+            # Call service to add the calibration point
+            self._call_add_calibration_point(x, y, raw_value, reference_temp)
+            
+            self._node.get_logger().info(f'Added calibration point: {new_point}')
+        
             # Hide temperature input controls and re-enable enter button regardless
             self.temp_input_widget.setVisible(False)
             self.enter_temp_btn.setEnabled(True)  
@@ -1105,7 +1170,7 @@ class ThermalCalibrationPlugin(PyPlugin):
             )
             
             if reply == QMessageBox.Yes:
-                # Store point values before removal
+                # Store point values before removal for logging
                 point_x = last_point['x']
                 point_y = last_point['y']
                 point_temp = last_point['reference_temp']
@@ -1118,10 +1183,10 @@ class ThermalCalibrationPlugin(PyPlugin):
                 
                 # Remove from image view
                 try:
-                    # Clear the overlay's calibration points and rebuild them
+                    # Clear and rebuild the overlay's points
                     self.image_view.clear_calibration_points()
                     
-                    # Rebuild all points except the one we removed
+                    # Rebuild all points
                     for point in self.calibration_points:
                         self.image_view.add_calibration_point(
                             point['x'], 
@@ -1135,19 +1200,20 @@ class ThermalCalibrationPlugin(PyPlugin):
                 except Exception as e:
                     self._node.get_logger().error(f'Error updating overlay: {e}')
                     self._node.get_logger().error(traceback.format_exc())
-                
-                # Instead of clearing all data and re-adding, we should have a proper
-                # remove_calibration_point service. For now, log the limitation.
-                self._node.get_logger().warn(
-                    "Remove last point: The backend doesn't support direct point removal. " +
-                    "Point removed from UI only.")
                     
-                # Optionally, we could implement the clear-and-re-add approach safely:
-                # self._call_clear_calibration_data()
-                # for point in self.calibration_points:
-                #    self._call_add_calibration_point(point['x'], point['y'], 
-                #                                    point['raw_value'], point['reference_temp'])
+                # Use the clear-and-rebuild approach to keep backend and UI in sync
+                self._node.get_logger().info("Synchronizing backend with UI after point removal")
+                success = self._clear_and_rebuild_backend_points()
                 
+                if not success:
+                    self._node.get_logger().warn(
+                        "Remove last point: The backend couldn't be synchronized. " +
+                        "Point was removed from UI only.")
+                        
+                    # Show an unobtrusive notification to the user
+                    self.service_status_label.setText("Backend out of sync - point removed in UI only")
+                    self.service_status_indicator.setStyleSheet("background-color: orange; border-radius: 8px;")
+                    
                 # Disable remove button if no more points
                 if not self.calibration_points:
                     self.remove_last_btn.setEnabled(False)
@@ -1316,7 +1382,7 @@ class ThermalCalibrationPlugin(PyPlugin):
     # Service call methods
 
     def _track_service_call(self, service_name, identifier, future):
-        """Track a service call to prevent race conditions."""
+        """Track a service call to prevent race conditions and handle timeouts."""
         key = f"{service_name}:{identifier}"
         
         with QMutexLocker(self.service_mutex):
@@ -1327,12 +1393,21 @@ class ThermalCalibrationPlugin(PyPlugin):
             with QMutexLocker(self.service_mutex):
                 if key in self.pending_service_calls:
                     del self.pending_service_calls[key]
+                    
+                    # Clear any associated timeout timer
+                    timer_key = key + "_timer"
+                    if timer_key in self.pending_service_calls:
+                        timer = self.pending_service_calls[timer_key]
+                        if timer.isActive():
+                            timer.stop()
+                        del self.pending_service_calls[timer_key]
+                    
                     self._node.get_logger().debug(f'Service call {key} completed and removed from tracking')
         
         # Add cleanup callback
         future.add_done_callback(cleanup_callback)
         
-        return key    
+        return key
 
     def _call_get_raw_value(self, x, y):
         """Call the get_raw_value service with tracking."""
@@ -1433,11 +1508,7 @@ class ThermalCalibrationPlugin(PyPlugin):
         """Call the add_calibration_point service with tracking."""
         if not self.add_calibration_point_client.service_is_ready():
             self._node.get_logger().warn('add_calibration_point service not available')
-            
-            # Even if service is unavailable, we've already added the point locally
-            # in _on_save_temp_clicked, so just show a warning
-            QMessageBox.warning(self._widget, "Service Unavailable", 
-                            "Could not connect to calibration service. Point was added locally but may not persist.")
+            self._update_service_status_indicators(False)
             return
         
         # Create a unique ID for this calibration point
@@ -1488,47 +1559,79 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Track this call
             self._track_service_call("add_calibration_point", point_id, future)
             future.add_done_callback(self._add_calibration_point_done)
+            
+            # Set up a timeout timer
+            point_timeout = QTimer(self._widget)
+            point_timeout.setSingleShot(True)
+            point_timeout.timeout.connect(lambda: self._handle_service_timeout(call_key, "add_point"))
+            point_timeout.start(5000)  # 5 second timeout
+            
+            # Store the timer
+            with QMutexLocker(self.service_mutex):
+                self.pending_service_calls[call_key + "_timer"] = point_timeout
+                
+            # Update service status to show we're connecting
+            self._update_service_status_indicators(True) 
+                
         except Exception as e:
             self._node.get_logger().error(f'Error calling add_calibration_point service: {e}')
-            QMessageBox.warning(self._widget, "Service Error", 
-                            f"Error adding calibration point: {str(e)}")
+            self._update_service_status_indicators(False)
     
     def _add_calibration_point_done(self, future):
         """Callback for add_calibration_point service response."""
         try:
             response = future.result()
+            
+            # Update service status to indicate success
+            self._update_service_status_indicators(True)
+            
             if response.success:
-                # Find the matching point by coordinates and temperature
-                found_point = None
-                for point in self.calibration_points:
-                    if (point['x'] == self.selected_coords[0] and 
-                        point['y'] == self.selected_coords[1] and
-                        abs(point['reference_temp'] - self.temp_input.value()) < 0.001):
-                        found_point = point
-                        break
-                
-                # If we found a matching point, update its ID to match the backend
-                if found_point:
-                    if found_point['id'] != response.point_id:
-                        self._node.get_logger().info(
-                            f"Point exists in UI. Backend assigned ID: {response.point_id}")
-                        # We'll intentionally NOT update the UI ID to avoid confusion
-                        # found_point['id'] = response.point_id
-                        # self.signal_helper.points_table_update_signal.emit()
-                else:
-                    # This shouldn't normally happen unless there's a race condition
-                    self._node.get_logger().warn(
-                        f"Service added point with ID {response.point_id}, but no matching UI point found")
+                # Log the backend's response but don't modify UI - it's already been updated
+                self._node.get_logger().info(f"Backend added point with ID: {response.point_id} - {response.message}")
             else:
-                QMessageBox.warning(self._widget, "Error", response.message)
+                # If backend rejected the point, we should log it but not show a dialog
+                # since we've already added it to the UI
+                self._node.get_logger().warn(f"Backend rejected point: {response.message}")
+                
+                # If it's a duplicate point warning from the backend, let's log it but not bother the user
+                if "duplicate" in response.message.lower():
+                    self._node.get_logger().info("Backend detected duplicate point - this is expected behavior")
+                    
+                # Note: We intentionally don't remove the point from the UI even if backend rejected it
+                # This keeps the UI responsive and consistent with what the user expects
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
-            QMessageBox.critical(self._widget, "Error", f"Service call failed: {e}")
-    
+            self._update_service_status_indicators(False)
+
+    def _update_service_status_indicators(self, connected=None):
+        """Update UI indicators for service status."""
+        if not hasattr(self, 'service_status_indicator'):
+            return  # UI not initialized yet
+            
+        # If no specific state is provided, check all services
+        if connected is None:
+            services_ready = (
+                self.get_raw_value_client.service_is_ready() and
+                self.add_calibration_point_client.service_is_ready() and
+                self.perform_calibration_client.service_is_ready() and
+                self.clear_calibration_data_client.service_is_ready()
+            )
+        else:
+            services_ready = connected
+            
+        # Update indicators based on connection status
+        if services_ready:
+            self.service_status_indicator.setStyleSheet("background-color: green; border-radius: 8px;")
+            self.service_status_label.setText("Services Connected")
+        else:
+            self.service_status_indicator.setStyleSheet("background-color: red; border-radius: 8px;")
+            self.service_status_label.setText("Service Connection Issues")
+
     def _call_perform_calibration(self, model_type, degree):
         """Call the perform_calibration service with tracking."""
         if not self.perform_calibration_client.service_is_ready():
             self._node.get_logger().warn('perform_calibration service not available')
+            self._update_service_status_indicators(False)
             QMessageBox.warning(self._widget, "Service Unavailable", 
                             "Calibration service is not available. Please try again later.")
             return
@@ -1551,18 +1654,53 @@ class ThermalCalibrationPlugin(PyPlugin):
         request.degree = degree
         
         try:
+            # Create progress dialog
+            self.calibration_progress = QProgressDialog("Performing calibration...", "Cancel", 0, 0, self._widget)
+            self.calibration_progress.setWindowModality(Qt.WindowModal)
+            self.calibration_progress.setMinimumDuration(500)  # Show after 500ms
+            self.calibration_progress.setCancelButton(None)  # Hide cancel button
+            self.calibration_progress.setWindowTitle("Calibration")
+            self.calibration_progress.show()
+            
+            # Make service call
             future = self.perform_calibration_client.call_async(request)
             # Track this call
             self._track_service_call("perform_calibration", call_id, future)
             future.add_done_callback(self._perform_calibration_done)
             
-            # Optionally, show a "processing" message or disable the calibrate button
+            # Disable the calibrate button while processing
             self.calibrate_btn.setEnabled(False)
             self.calibrate_btn.setText("Calibrating...")
+            
+            # Set up a timeout timer to re-enable the button if the service call takes too long
+            calibration_timeout = QTimer(self._widget)
+            calibration_timeout.setSingleShot(True)
+            calibration_timeout.timeout.connect(lambda: self._handle_service_timeout(call_key, "calibration"))
+            calibration_timeout.start(15000)  # 15 second timeout
+            
+            # Store the timer in a dictionary to manage it
+            with QMutexLocker(self.service_mutex):
+                self.pending_service_calls[call_key + "_timer"] = calibration_timeout
+                
+            # Update service status
+            self._update_service_status_indicators(True)
+                
         except Exception as e:
+            # Clean up UI in case of error
             self._node.get_logger().error(f'Error calling perform_calibration service: {e}')
+            
+            if hasattr(self, 'calibration_progress') and self.calibration_progress:
+                self.calibration_progress.hide()
+                
             QMessageBox.warning(self._widget, "Service Error", 
                             f"Error performing calibration: {str(e)}")
+            
+            # Make sure the button is re-enabled in case of error
+            self.calibrate_btn.setEnabled(True)
+            self.calibrate_btn.setText("Calibrate")
+            
+            # Update service status
+            self._update_service_status_indicators(False)
     
     def _perform_calibration_done(self, future):
         """Callback for perform_calibration service response."""
@@ -1570,8 +1708,16 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.calibrate_btn.setEnabled(True)
         self.calibrate_btn.setText("Calibrate")
         
+        # Hide the progress dialog if it exists
+        if hasattr(self, 'calibration_progress') and self.calibration_progress:
+            self.calibration_progress.hide()
+        
         try:
             response = future.result()
+            
+            # Update service status
+            self._update_service_status_indicators(True)
+            
             if response.success:
                 # Store calibration model
                 self.calibration_model = {
@@ -1591,6 +1737,9 @@ class ThermalCalibrationPlugin(PyPlugin):
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
             QMessageBox.critical(self._widget, "Error", f"Service call failed: {e}")
+            
+            # Update service status to indicate problem
+            self._update_service_status_indicators(False)
     
     def _call_clear_calibration_data(self):
         """Call the clear_calibration_data service with tracking."""
@@ -1678,7 +1827,121 @@ class ThermalCalibrationPlugin(PyPlugin):
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
             QMessageBox.critical(self._widget, "Error", f"Service call failed: {e}")
-    
+
+    def _clear_and_rebuild_backend_points(self):
+        """Clear all points on the backend and rebuild from UI points."""
+        # First, verify the service is available
+        if not self.clear_calibration_data_client.service_is_ready():
+            self._node.get_logger().warn('clear_calibration_data service not available')
+            self._update_service_status_indicators(False)
+            return False
+
+        # Create a unique call ID
+        call_key = "clear_calibration_data:rebuild"
+        
+        # Proceed with service call to clear data
+        request = ClearCalibrationData.Request()
+        request.confirm = True
+        
+        try:
+            # Call the service to clear all points
+            future = self.clear_calibration_data_client.call_async(request)
+            
+            # Track this call with a timeout
+            self._track_service_call("clear_calibration_data", "rebuild", future)
+            
+            # Set up a timeout handler
+            clear_timeout = QTimer(self._widget)
+            clear_timeout.setSingleShot(True)
+            clear_timeout.timeout.connect(lambda: self._handle_service_timeout(call_key, "clear_points"))
+            clear_timeout.start(5000)  # 5 second timeout
+            
+            # Store the timer
+            with QMutexLocker(self.service_mutex):
+                self.pending_service_calls[call_key + "_timer"] = clear_timeout
+            
+            # Define the callback to add points after clearing
+            def clear_done_add_points(clear_future):
+                try:
+                    # Get clear response
+                    clear_response = clear_future.result()
+                    
+                    if clear_response.success:
+                        self._node.get_logger().info("Successfully cleared backend data, now rebuilding")
+                        
+                        # Add all points that remain in UI
+                        for point in self.calibration_points:
+                            self._call_add_calibration_point(
+                                point['x'], 
+                                point['y'], 
+                                point['raw_value'], 
+                                point['reference_temp']
+                            )
+                            # Small delay to prevent overwhelming the service
+                            time.sleep(0.1)
+                    else:
+                        self._node.get_logger().error(f"Failed to clear backend data: {clear_response.message}")
+                        self._update_service_status_indicators(False)
+                except Exception as e:
+                    self._node.get_logger().error(f"Error in clear_done_add_points: {e}")
+                    self._update_service_status_indicators(False)
+            
+            # Add the callback
+            future.add_done_callback(clear_done_add_points)
+            
+            # Update service status to show we're working
+            self._update_service_status_indicators(True)
+            return True
+            
+        except Exception as e:
+            self._node.get_logger().error(f'Error calling clear_calibration_data service: {e}')
+            self._update_service_status_indicators(False)
+            return False
+
+
+    def _handle_service_timeout(self, call_key, service_type):
+        """Handle timeouts for service calls."""
+        with QMutexLocker(self.service_mutex):
+            if call_key in self.pending_service_calls:
+                # Service call still pending after timeout
+                self._node.get_logger().warn(f'Service call timed out: {call_key}')
+                
+                # Clean up the timer
+                timer_key = call_key + "_timer"
+                if timer_key in self.pending_service_calls:
+                    # Stop the timer if it's still running
+                    timer = self.pending_service_calls[timer_key]
+                    if timer.isActive():
+                        timer.stop()
+                    # Remove from tracking
+                    del self.pending_service_calls[timer_key]
+                
+                # Take appropriate action based on service type
+                if service_type == "calibration":
+                    # Re-enable the calibrate button
+                    self.calibrate_btn.setEnabled(True)
+                    self.calibrate_btn.setText("Calibrate")
+                    
+                    # Hide the progress dialog if it exists
+                    if hasattr(self, 'calibration_progress') and self.calibration_progress:
+                        self.calibration_progress.hide()
+                    
+                    # Show a message to the user
+                    QMessageBox.warning(self._widget, "Calibration Timeout", 
+                                    "The calibration operation is taking too long. Please try again.")
+                elif service_type == "add_point":
+                    # No need to show a dialog, just log it
+                    self._node.get_logger().warn("Adding point to backend timed out - point is in UI only")
+                elif service_type == "clear_points":
+                    # Update UI to show something went wrong
+                    self.service_status_indicator.setStyleSheet("background-color: orange")
+                    self.service_status_label.setText("Service timeout - clearing points failed")
+                
+                # Remove the pending service call from tracking
+                if call_key in self.pending_service_calls:
+                    del self.pending_service_calls[call_key]
+
+
     def _call_raw_to_temperature(self, raw_value):
         """Call the raw_to_temperature service with tracking."""
         if not self.raw_to_temperature_client.service_is_ready():
@@ -1832,7 +2095,7 @@ class ThermalCalibrationPlugin(PyPlugin):
             QMessageBox.critical(self._widget, "Error", f"Service call failed: {e}")
     
     def _try_reconnect_services(self):
-        """Try to reconnect to any unavailable services."""
+        """Try to reconnect to any unavailable services and update UI indicators."""
         services_to_check = [
             (self.get_raw_value_client, 'get_raw_value'),
             (self.add_calibration_point_client, 'add_calibration_point'),
@@ -1843,19 +2106,27 @@ class ThermalCalibrationPlugin(PyPlugin):
             (self.load_calibration_model_client, 'load_calibration_model')
         ]
         
+        all_ready = True
         reconnected = False
         
         for client, name in services_to_check:
-            if client is not None and not client.service_is_ready():
-                if client.wait_for_service(timeout_sec=0.1):
-                    self._node.get_logger().info(f'Successfully reconnected to {name} service')
-                    reconnected = True
+            if client is not None:
+                if not client.service_is_ready():
+                    all_ready = False
+                    if client.wait_for_service(timeout_sec=0.1):
+                        self._node.get_logger().info(f'Successfully reconnected to {name} service')
+                        reconnected = True
+                else:
+                    # Service is already ready
+                    pass
         
-        # If any service was reconnected, update UI accordingly
+        # Update the UI status indicators based on service availability
+        self._update_service_status_indicators(all_ready)
+        
+        # If any service was reconnected, extra update
         if reconnected:
-            # We might want to update UI elements to reflect service availability
-            # For example, enable/disable buttons that depend on services
-            pass
+            # Check if we're out of sync and need to rebuild
+            self._node.get_logger().info("Service reconnected - checking if sync is needed")
 
     def resizeEvent(self, event):
         """Handle resize events."""

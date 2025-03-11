@@ -996,41 +996,55 @@ class ThermalCalibrationPlugin(PyPlugin):
         
         # Add calibration point using stored coordinates and raw value
         try:
-            # Store point locally first for immediate feedback
-            point_id = len(self.calibration_points) + 1
-            new_point = {
-                'id': point_id,
-                'x': x,
-                'y': y,
-                'raw_value': raw_value,
-                'reference_temp': reference_temp,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            # Add to local model
-            self.calibration_points.append(new_point)
-            
-            # Update UI directly without going through signals to avoid threading issues
-            self._update_points_table()
-            
-            # Add point to image view - avoid crossing thread boundaries
-            # This was likely causing the QObject::setParent error
-            try:
-                self.image_view.add_calibration_point(x, y, reference_temp, raw_value)
-            except Exception as e:
-                self._node.get_logger().error(f'Error adding point to image view: {e}')
-            
-            # Call service to add the calibration point
-            self._call_add_calibration_point(x, y, raw_value, reference_temp)
+            # Check if a point with these exact coordinates and temperature already exists
+            # This prevents duplicates if the user somehow triggers the save action twice
+            duplicate_found = False
+            for point in self.calibration_points:
+                if (point['x'] == x and 
+                    point['y'] == y and 
+                    abs(point['reference_temp'] - reference_temp) < 0.001):
+                    duplicate_found = True
+                    self._node.get_logger().warn(f"Duplicate point detected: ({x}, {y}) at {reference_temp}°C")
+                    break
+                    
+            if not duplicate_found:
+                # Store point locally first for immediate feedback
+                point_id = len(self.calibration_points) + 1
+                new_point = {
+                    'id': point_id,
+                    'x': x,
+                    'y': y,
+                    'raw_value': raw_value,
+                    'reference_temp': reference_temp,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Add to local model
+                self.calibration_points.append(new_point)
+                
+                # Update UI directly
+                self._update_points_table()
+                
+                # Add point to image view
+                try:
+                    self.image_view.add_calibration_point(x, y, reference_temp, raw_value)
+                except Exception as e:
+                    self._node.get_logger().error(f'Error adding point to image view: {e}')
+                
+                # Call service to add the calibration point
+                self._call_add_calibration_point(x, y, raw_value, reference_temp)
+                
+                self._node.get_logger().info(f'Added calibration point: {new_point}')
+            else:
+                # Even for duplicates, call the service to ensure backend consistency
+                self._call_add_calibration_point(x, y, raw_value, reference_temp)
             
             # Hide temperature input controls and re-enable enter button
             self.temp_input_widget.setVisible(False)
             self.enter_temp_btn.setEnabled(True)  
             
-            # Enable remove last button
-            self.remove_last_btn.setEnabled(True)
-            
-            self._node.get_logger().info(f'Added calibration point: {new_point}')
+            # Enable remove last button if we have points
+            self.remove_last_btn.setEnabled(len(self.calibration_points) > 0)
             
         except Exception as e:
             self._node.get_logger().error(f'Error saving temperature: {e}')
@@ -1441,44 +1455,43 @@ class ThermalCalibrationPlugin(PyPlugin):
         try:
             response = future.result()
             if response.success:
-                # Check if the point was already added directly in _on_save_temp_clicked
-                # to avoid duplicate entries
-                already_exists = False
+                # We don't need to add the point again because it was already added
+                # in _save_temperature_value for immediate feedback
+                # Just log the successful service call
+                self._node.get_logger().info(f"Calibration point successfully added to backend: {response.point_id}")
+                
+                # We can update the point ID if needed for consistency with the server
+                # Find the matching point by coordinates and temperature
                 for point in self.calibration_points:
                     if (point['x'] == self.selected_coords[0] and 
                         point['y'] == self.selected_coords[1] and
                         abs(point['reference_temp'] - self.temp_input.value()) < 0.001):
-                        already_exists = True
+                        # Update the point ID from the server
+                        if point['id'] != response.point_id:
+                            self._node.get_logger().info(f"Updating point ID from {point['id']} to {response.point_id}")
+                            point['id'] = response.point_id
+                            # Update UI to reflect the ID change
+                            self.signal_helper.points_table_update_signal.emit()
                         break
-                
-                if not already_exists:
-                    # Add point to local list
-                    point = {
-                        'id': response.point_id,
-                        'x': self.selected_coords[0],
-                        'y': self.selected_coords[1],
-                        'raw_value': self.current_raw_value,
-                        'reference_temp': self.temp_input.value(),
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    self.calibration_points.append(point)
-                    
-                    # Add to overlay if not already there
-                    self.image_view.add_calibration_point(
-                        point['x'], 
-                        point['y'], 
-                        point['reference_temp'], 
-                        point['raw_value']
-                    )
-                
-                # Update UI via signal regardless - this ensures consistency
-                self.signal_helper.points_table_update_signal.emit()
-                
-                # Only show the success message if it hasn't been shown already
-                if not already_exists:
-                    QMessageBox.information(self._widget, "Success", response.message)
             else:
+                # Handle error case
                 QMessageBox.warning(self._widget, "Error", response.message)
+                
+                # If the service failed, we should probably remove the point we added locally
+                # since it wasn't successfully added to the backend
+                for i, point in enumerate(self.calibration_points):
+                    if (point['x'] == self.selected_coords[0] and 
+                        point['y'] == self.selected_coords[1] and
+                        abs(point['reference_temp'] - self.temp_input.value()) < 0.001):
+                        self._node.get_logger().info(f"Removing locally added point due to service error")
+                        self.calibration_points.pop(i)
+                        
+                        # Also remove from image view
+                        self.image_view.remove_calibration_point(i)
+                        
+                        # Update UI
+                        self.signal_helper.points_table_update_signal.emit()
+                        break
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
             QMessageBox.critical(self._widget, "Error", f"Service call failed: {e}")

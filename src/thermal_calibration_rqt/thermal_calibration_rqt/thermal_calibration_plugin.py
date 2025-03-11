@@ -1139,14 +1139,21 @@ class ThermalCalibrationPlugin(PyPlugin):
             self.enter_temp_btn.setEnabled(True)
 
     def _on_save_temp_clicked(self):
-        """Handle click on save temperature button inside the temperature input controls."""
-        # Commit any partial edits in the spin box before getting the value
-        self.temp_input.interpretText()
-        self.temp_input.clearFocus()  # Force the widget to apply any current edits
+        """Handle click on save temperature button."""
+        # Disconnect the editing finished signal temporarily to prevent double-saving
+        self.temp_input.editingFinished.disconnect(self._on_temp_input_editing_finished)
         
-        self._node.get_logger().info("Save button clicked - saving temperature value")
-        self._save_temperature_value()
-    
+        try:
+            # Commit any partial edits
+            self.temp_input.interpretText()
+            self.temp_input.clearFocus()
+            
+            self._node.get_logger().info("Save button clicked - saving temperature value")
+            self._save_temperature_value()
+        finally:
+            # Reconnect the signal
+            self.temp_input.editingFinished.connect(self._on_temp_input_editing_finished)
+
     def _on_cancel_temp_clicked(self):
         """Handle click on cancel temperature button."""
         # Hide temperature input and re-enable the enter temperature button
@@ -2179,10 +2186,11 @@ class ThermalCalibrationPlugin(PyPlugin):
 
     def _on_temp_input_editing_finished(self):
         """Handle when user presses Enter in the temperature input field."""
-        # Only trigger save if the temperature input widget is visible
-        if self.temp_input_widget.isVisible():
+        # Only trigger save if the temperature input widget is visible AND 
+        # this wasn't triggered by the save button
+        if self.temp_input_widget.isVisible() and not self.temp_input.hasFocus():
             self._node.get_logger().info("Temperature input editing finished - committing value")
-            self._on_save_temp_clicked()
+            self._save_temperature_value()
 
 
 def main(args=None):

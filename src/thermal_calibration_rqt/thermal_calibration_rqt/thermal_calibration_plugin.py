@@ -9,8 +9,9 @@ import cv2
 from cv_bridge import CvBridge
 
 from python_qt_binding import loadUi
-from python_qt_binding.QtCore import Qt, QTimer, Signal, Slot, QObject, QMutex, QMutexLocker, pyqtSignal, QRect, QFontMetrics
-from python_qt_binding.QtGui import QImage, QPixmap, QPen, QColor, QPainter
+from python_qt_binding.QtCore import Qt, QTimer, Signal, Slot, QObject, QMutex, QMutexLocker, pyqtSignal, QRect
+# Import QFontMetrics from QtGui instead of QtCore
+from python_qt_binding.QtGui import QImage, QPixmap, QPen, QColor, QPainter, QFontMetrics
 from python_qt_binding.QtWidgets import (QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                                          QLabel, QSplitter, QTableWidget, QTableWidgetItem,
                                          QHeaderView, QMessageBox, QInputDialog, QDoubleSpinBox,

@@ -23,6 +23,7 @@ import threading
 from functools import partial
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
+from rclpy.qos import QoSProfile, ReliabilityPolicy, QoSHistoryPolicy
 
 from qt_gui.plugin import Plugin
 from rqt_gui_py.plugin import Plugin as PyPlugin

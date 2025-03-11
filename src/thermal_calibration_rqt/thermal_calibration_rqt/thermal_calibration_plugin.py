@@ -94,13 +94,14 @@ class ThermalImageOverlay(QWidget):
     def remove_calibration_point(self, index):
         """Remove a point from the calibration points list."""
         if 0 <= index < len(self.calibration_points):
+            removed_point = self.calibration_points[index]
             del self.calibration_points[index]
             self.update()  # Trigger repaint
+            print(f"Removed point at ({removed_point[0]}, {removed_point[1]}) from overlay")
             return True
         else:
-            # Log an error if index is out of bounds
-            print(f"Error: Cannot remove point at index {index}. Only have {len(self.calibration_points)} points.")
-        return False
+            print(f"Error: Cannot remove point at index {index}. Have {len(self.calibration_points)} points.")
+            return False
     
     def clear_calibration_points(self):
         """Clear all calibration points."""
@@ -1010,8 +1011,7 @@ class ThermalCalibrationPlugin(PyPlugin):
         
         # Add calibration point using stored coordinates and raw value
         try:
-            # Check if a point with these exact coordinates and temperature already exists
-            # This prevents duplicates if the user somehow triggers the save action twice
+            # Check for duplicates more carefully
             duplicate_found = False
             for point in self.calibration_points:
                 if (point['x'] == x and 
@@ -1019,10 +1019,14 @@ class ThermalCalibrationPlugin(PyPlugin):
                     abs(point['reference_temp'] - reference_temp) < 0.001):
                     duplicate_found = True
                     self._node.get_logger().warn(f"Duplicate point detected: ({x}, {y}) at {reference_temp}°C")
+                    
+                    # Show a warning to the user
+                    QMessageBox.warning(self._widget, "Duplicate Point", 
+                                    f"A point at ({x}, {y}) with temperature {reference_temp}°C already exists.")
                     break
                     
             if not duplicate_found:
-                # Store point locally first for immediate feedback
+                # Store point locally for immediate feedback
                 point_id = len(self.calibration_points) + 1
                 new_point = {
                     'id': point_id,
@@ -1036,7 +1040,7 @@ class ThermalCalibrationPlugin(PyPlugin):
                 # Add to local model
                 self.calibration_points.append(new_point)
                 
-                # Update UI directly
+                # Update UI
                 self._update_points_table()
                 
                 # Add point to image view
@@ -1045,15 +1049,12 @@ class ThermalCalibrationPlugin(PyPlugin):
                 except Exception as e:
                     self._node.get_logger().error(f'Error adding point to image view: {e}')
                 
-                # Call service to add the calibration point
+                # Call service to add the calibration point ONLY if not a duplicate
                 self._call_add_calibration_point(x, y, raw_value, reference_temp)
                 
                 self._node.get_logger().info(f'Added calibration point: {new_point}')
-            else:
-                # Even for duplicates, call the service to ensure backend consistency
-                self._call_add_calibration_point(x, y, raw_value, reference_temp)
             
-            # Hide temperature input controls and re-enable enter button
+            # Hide temperature input controls and re-enable enter button regardless
             self.temp_input_widget.setVisible(False)
             self.enter_temp_btn.setEnabled(True)  
             
@@ -1104,36 +1105,56 @@ class ThermalCalibrationPlugin(PyPlugin):
             )
             
             if reply == QMessageBox.Yes:
+                # Store point values before removal
+                point_x = last_point['x']
+                point_y = last_point['y']
+                point_temp = last_point['reference_temp']
+                
                 # Remove from our local list
                 self.calibration_points.pop()
                 
-                # Remove from image view overlay
-                try:
-                    # Access the overlay's calibration points directly to check if there are any
-                    if hasattr(self.image_view, 'overlay') and hasattr(self.image_view.overlay, 'calibration_points') and self.image_view.overlay.calibration_points:
-                        self.image_view.overlay.remove_calibration_point(len(self.image_view.overlay.calibration_points) - 1)
-                    else:
-                        self._node.get_logger().warn("No overlay calibration points to remove")
-                except Exception as e:
-                    self._node.get_logger().error(f'Error removing point from overlay: {e}')
-                    self._node.get_logger().error(traceback.format_exc())
-                
-                # Update UI via signal
+                # Update the table UI immediately
                 self.signal_helper.points_table_update_signal.emit()
                 
-                # Call service to remove point (if implemented)
-                # For now, we'll just clear all and re-add the remaining points
-                self._call_clear_calibration_data()
+                # Remove from image view
+                try:
+                    # Clear the overlay's calibration points and rebuild them
+                    self.image_view.clear_calibration_points()
+                    
+                    # Rebuild all points except the one we removed
+                    for point in self.calibration_points:
+                        self.image_view.add_calibration_point(
+                            point['x'], 
+                            point['y'], 
+                            point['reference_temp'], 
+                            point['raw_value']
+                        )
+                        
+                    # Force update of the overlay
+                    self.image_view.overlay.update()
+                except Exception as e:
+                    self._node.get_logger().error(f'Error updating overlay: {e}')
+                    self._node.get_logger().error(traceback.format_exc())
                 
-                # Re-add all remaining points
-                for point in self.calibration_points:
-                    self._call_add_calibration_point(
-                        point['x'], point['y'], point['raw_value'], point['reference_temp']
-                    )
+                # Instead of clearing all data and re-adding, we should have a proper
+                # remove_calibration_point service. For now, log the limitation.
+                self._node.get_logger().warn(
+                    "Remove last point: The backend doesn't support direct point removal. " +
+                    "Point removed from UI only.")
+                    
+                # Optionally, we could implement the clear-and-re-add approach safely:
+                # self._call_clear_calibration_data()
+                # for point in self.calibration_points:
+                #    self._call_add_calibration_point(point['x'], point['y'], 
+                #                                    point['raw_value'], point['reference_temp'])
                 
                 # Disable remove button if no more points
                 if not self.calibration_points:
                     self.remove_last_btn.setEnabled(False)
+                    
+                # Log successful removal
+                self._node.get_logger().info(
+                    f"Removed point ({point_x}, {point_y}) with temperature {point_temp}°C")
             
         except Exception as e:
             self._node.get_logger().error(f'Error removing last point: {e}')
@@ -1477,43 +1498,29 @@ class ThermalCalibrationPlugin(PyPlugin):
         try:
             response = future.result()
             if response.success:
-                # We don't need to add the point again because it was already added
-                # in _save_temperature_value for immediate feedback
-                # Just log the successful service call
-                self._node.get_logger().info(f"Calibration point successfully added to backend: {response.point_id}")
-                
-                # We can update the point ID if needed for consistency with the server
                 # Find the matching point by coordinates and temperature
+                found_point = None
                 for point in self.calibration_points:
                     if (point['x'] == self.selected_coords[0] and 
                         point['y'] == self.selected_coords[1] and
                         abs(point['reference_temp'] - self.temp_input.value()) < 0.001):
-                        # Update the point ID from the server
-                        if point['id'] != response.point_id:
-                            self._node.get_logger().info(f"Updating point ID from {point['id']} to {response.point_id}")
-                            point['id'] = response.point_id
-                            # Update UI to reflect the ID change
-                            self.signal_helper.points_table_update_signal.emit()
+                        found_point = point
                         break
-            else:
-                # Handle error case
-                QMessageBox.warning(self._widget, "Error", response.message)
                 
-                # If the service failed, we should probably remove the point we added locally
-                # since it wasn't successfully added to the backend
-                for i, point in enumerate(self.calibration_points):
-                    if (point['x'] == self.selected_coords[0] and 
-                        point['y'] == self.selected_coords[1] and
-                        abs(point['reference_temp'] - self.temp_input.value()) < 0.001):
-                        self._node.get_logger().info(f"Removing locally added point due to service error")
-                        self.calibration_points.pop(i)
-                        
-                        # Also remove from image view
-                        self.image_view.remove_calibration_point(i)
-                        
-                        # Update UI
-                        self.signal_helper.points_table_update_signal.emit()
-                        break
+                # If we found a matching point, update its ID to match the backend
+                if found_point:
+                    if found_point['id'] != response.point_id:
+                        self._node.get_logger().info(
+                            f"Point exists in UI. Backend assigned ID: {response.point_id}")
+                        # We'll intentionally NOT update the UI ID to avoid confusion
+                        # found_point['id'] = response.point_id
+                        # self.signal_helper.points_table_update_signal.emit()
+                else:
+                    # This shouldn't normally happen unless there's a race condition
+                    self._node.get_logger().warn(
+                        f"Service added point with ID {response.point_id}, but no matching UI point found")
+            else:
+                QMessageBox.warning(self._widget, "Error", response.message)
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
             QMessageBox.critical(self._widget, "Error", f"Service call failed: {e}")

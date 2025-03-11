@@ -368,12 +368,15 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.radiometric_mode = False
         self.last_raw_values = {}  # Dictionary to store raw values by coordinates
         self.image_mutex = QMutex()  # For thread safety
+        self.raw_value_mutex = QMutex()  # Additional mutex for raw values
         
         # Initialize mutex for service call tracking
         self.service_mutex = QMutex()
-
+        
         # Dictionary to track pending service calls
         self.pending_service_calls = {}  # Format: {"service_name:identifier": future}
+        
+        # [Rest of the __init__ method remains unchanged]
         
         # Define callback groups for threading safety
         self.callback_group = ReentrantCallbackGroup()
@@ -712,7 +715,8 @@ class ThermalCalibrationPlugin(PyPlugin):
         """Callback for 16-bit thermal image used for calibration."""
         try:
             # Convert ROS image message to OpenCV image
-            self.current_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono16")
+            with QMutexLocker(self.image_mutex):
+                self.current_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono16")
             
             # Process this image for display if we don't have an 8-bit stream
             if not hasattr(self, 'has_8bit_stream') or not self.has_8bit_stream:
@@ -721,26 +725,42 @@ class ThermalCalibrationPlugin(PyPlugin):
                 colored_img = cv2.applyColorMap(display_img, cv2.COLORMAP_INFERNO)
                 self.signal_helper.image_update_signal.emit(colored_img)
             
+            # Thread-safe check for selected coordinates
+            selected_coords = None
+            current_raw_value = None
+            with QMutexLocker(self.raw_value_mutex):
+                if hasattr(self, 'selected_coords') and self.selected_coords:
+                    selected_coords = self.selected_coords
+                    current_raw_value = self.current_raw_value
+                    
             # If we have selected coordinates but no raw value yet, try to get it from the current frame
-            # Do NOT update if we already have a raw value - this prevents overwriting with values from new frames
-            if hasattr(self, 'selected_coords') and self.selected_coords:
-                x, y = self.selected_coords
+            if selected_coords is not None:
+                x, y = selected_coords
                 coord_key = f"{x},{y}"
                 
-                # Only update if we haven't processed this coordinate yet
-                if coord_key not in self.last_raw_values and 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                    # Get raw value from current frame and store it
-                    current_raw = int(self.current_image[y, x])
-                    self.last_raw_values[coord_key] = current_raw
+                # Thread-safe check if we've processed this coordinate
+                coord_processed = False
+                with QMutexLocker(self.raw_value_mutex):
+                    coord_processed = coord_key in self.last_raw_values
                     
-                    # Only update if we don't have a current raw value yet
-                    if self.current_raw_value is None:
-                        self.current_raw_value = current_raw
-                        # Use signal to update UI from main thread
-                        self.signal_helper.raw_value_update_signal.emit(f"Raw value: {current_raw}")
-                        
-                        # Also call the service to get a more reliable value
-                        self._call_get_raw_value(x, y)
+                # Only update if we haven't processed this coordinate yet
+                if not coord_processed:
+                    with QMutexLocker(self.image_mutex):
+                        if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
+                            # Get raw value from current frame and store it
+                            current_raw = int(self.current_image[y, x])
+                            
+                            with QMutexLocker(self.raw_value_mutex):
+                                self.last_raw_values[coord_key] = current_raw
+                                
+                                # Only update if we don't have a current raw value yet
+                                if self.current_raw_value is None:
+                                    self.current_raw_value = current_raw
+                                    # Use signal to update UI from main thread
+                                    self.signal_helper.raw_value_update_signal.emit(f"Raw value: {current_raw}")
+                                    
+                                    # Also call the service to get a more reliable value
+                                    self._call_get_raw_value(x, y)
             
         except Exception as e:
             self._node.get_logger().error(f'Error processing 16-bit image: {e}')
@@ -848,38 +868,60 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Enable the button to enter temperature
             self.enter_temp_btn.setEnabled(True)
             
+            # Define coord_key here so it's available throughout the method
+            coord_key = f"{x},{y}"
+            
+            # Thread-safe access to raw value cache
+            cached_raw = None
+            with QMutexLocker(self.raw_value_mutex):
+                if coord_key in self.last_raw_values:
+                    cached_raw = self.last_raw_values[coord_key]
+            
             # Immediately read the raw value from the current frame if available
             # This ensures we capture the value from the exact frame the user clicked on
             raw_value = None
-            if self.current_image is not None:
-                try:
-                    if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                        raw_value = int(self.current_image[y, x])
-                        self._node.get_logger().info(f'Immediate raw value from image: {raw_value}')
-                        
-                        # Store the raw value securely for this coordinate
-                        coord_key = f"{x},{y}"
-                        self.last_raw_values[coord_key] = raw_value
-                        
-                        # Set as current raw value and update UI
-                        self.current_raw_value = raw_value
-                        self.signal_helper.raw_value_update_signal.emit(f"Raw value: {raw_value}")
-                except Exception as e:
-                    self._node.get_logger().error(f'Error reading immediate raw value: {e}')
+            with QMutexLocker(self.image_mutex):
+                if self.current_image is not None:
+                    try:
+                        if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
+                            raw_value = int(self.current_image[y, x])
+                            self._node.get_logger().info(f'Immediate raw value from image: {raw_value}')
+                    except Exception as e:
+                        self._node.get_logger().error(f'Error reading immediate raw value: {e}')
+            
+            # Store the raw value securely for this coordinate if we got one
+            if raw_value is not None:
+                with QMutexLocker(self.raw_value_mutex):
+                    self.last_raw_values[coord_key] = raw_value
+                    self.current_raw_value = raw_value
+                    
+                # Update UI
+                self.signal_helper.raw_value_update_signal.emit(f"Raw value: {raw_value}")
+            elif cached_raw is not None:
+                # Use cached value if available
+                with QMutexLocker(self.raw_value_mutex):
+                    self.current_raw_value = cached_raw
+                    
+                self.signal_helper.raw_value_update_signal.emit(f"Raw value: {cached_raw}")
+            else:
+                # Reset raw value if nothing is available
+                with QMutexLocker(self.raw_value_mutex):
+                    self.current_raw_value = None
+                    
+                self.signal_helper.raw_value_update_signal.emit("Raw value: retrieving...")
             
             # Also call the service to get a possibly more accurate value, but
             # we'll keep the immediate value as a backup
             self._call_get_raw_value(x, y)
             
-            # If we don't have an immediate value but have a cached one, use it
-            if raw_value is None and coord_key in self.last_raw_values:
-                cached_raw = self.last_raw_values[coord_key]
-                self.current_raw_value = cached_raw
-                self.signal_helper.raw_value_update_signal.emit(f"Raw value: {cached_raw}")
-                
             # Update temperature display if in radiometric mode
-            if self.radiometric_mode and self.calibration_model and self.current_raw_value is not None:
-                self._update_temperature_display(self.current_raw_value)
+            if self.radiometric_mode and self.calibration_model:
+                current_raw = None
+                with QMutexLocker(self.raw_value_mutex):
+                    current_raw = self.current_raw_value
+                    
+                if current_raw is not None:
+                    self._update_temperature_display(current_raw)
     
     def _update_temperature_display(self, raw_value):
         """Update the temperature display for a given raw value using the current calibration model."""
@@ -925,29 +967,47 @@ class ThermalCalibrationPlugin(PyPlugin):
 
     def _on_save_temp_clicked(self):
         """Handle click on save temperature button with better error handling."""
+        # Thread-safe access to selected coordinates and raw values
+        selected_coords = None
+        current_raw_value = None
+        with QMutexLocker(self.raw_value_mutex):
+            selected_coords = self.selected_coords
+            current_raw_value = self.current_raw_value
+        
         # Verify we have necessary data
-        if self.selected_coords is None:
+        if selected_coords is None:
             QMessageBox.warning(self._widget, "No Selection", 
                             "Please select a point on the image first.")
             return
         
         # Check for raw value in a more robust way
         raw_value = None
-        x, y = self.selected_coords
+        x, y = selected_coords
         coord_key = f"{x},{y}"
         
-        # Try to get raw value from multiple sources
-        if hasattr(self, 'current_raw_value') and self.current_raw_value is not None:
-            raw_value = self.current_raw_value
-        elif coord_key in self.last_raw_values:
-            raw_value = self.last_raw_values[coord_key]
-        elif self.current_image is not None:
-            try:
-                if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                    raw_value = int(self.current_image[y, x])
-                    self._node.get_logger().info(f'Using immediate raw value from current image: {raw_value}')
-            except Exception as e:
-                self._node.get_logger().error(f'Error reading raw value from current image: {e}')
+        # Thread-safe access to raw values
+        with QMutexLocker(self.raw_value_mutex):
+            # Try to get raw value from multiple sources
+            if current_raw_value is not None:
+                raw_value = current_raw_value
+            elif coord_key in self.last_raw_values:
+                raw_value = self.last_raw_values[coord_key]
+        
+        # If still no raw value, try reading directly from image as last resort
+        if raw_value is None:
+            with QMutexLocker(self.image_mutex):
+                if self.current_image is not None:
+                    try:
+                        if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
+                            raw_value = int(self.current_image[y, x])
+                            self._node.get_logger().info(f'Using immediate raw value from current image: {raw_value}')
+                            
+                            # Store this value for future reference
+                            with QMutexLocker(self.raw_value_mutex):
+                                self.last_raw_values[coord_key] = raw_value
+                                self.current_raw_value = raw_value
+                    except Exception as e:
+                        self._node.get_logger().error(f'Error reading raw value from current image: {e}')
         
         if raw_value is None:
             QMessageBox.warning(self._widget, "No Raw Value", 
@@ -1292,25 +1352,31 @@ class ThermalCalibrationPlugin(PyPlugin):
         try:
             response = future.result()
             if response.success:
-                # Store the raw value persistently, but don't overwrite an existing value
-                # unless it's for the currently selected coordinates
-                if hasattr(self, 'selected_coords') and self.selected_coords:
-                    x, y = self.selected_coords
+                # Thread-safe access to selected coordinates
+                current_selected_coords = None
+                with QMutexLocker(self.raw_value_mutex):
+                    if hasattr(self, 'selected_coords'):
+                        current_selected_coords = self.selected_coords
+                
+                # Only update if we have valid coordinates
+                if current_selected_coords:
+                    x, y = current_selected_coords
                     coord_key = f"{x},{y}"
                     
-                    # Add to our cached values
-                    self.last_raw_values[coord_key] = response.raw_value
-                    
-                    # Only update current_raw_value if it's for the currently selected point
-                    if self.selected_coords == (x, y):
-                        self.current_raw_value = response.raw_value
-                        # Update UI
-                        self.signal_helper.raw_value_update_signal.emit(f"Raw value: {response.raw_value}")
+                    # Thread-safe update of raw values
+                    with QMutexLocker(self.raw_value_mutex):
+                        # Add to our cached values
+                        self.last_raw_values[coord_key] = response.raw_value
                         
-                        # Update temperature if in radiometric mode
-                        if self.radiometric_mode and self.calibration_model:
-                            self._update_temperature_display(response.raw_value)
-            
+                        # Only update current_raw_value if it's for the currently selected point
+                        if self.selected_coords == (x, y):
+                            self.current_raw_value = response.raw_value
+                            # Update UI
+                            self.signal_helper.raw_value_update_signal.emit(f"Raw value: {response.raw_value}")
+                            
+                            # Update temperature if in radiometric mode
+                            if self.radiometric_mode and self.calibration_model:
+                                self._update_temperature_display(response.raw_value)
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
     

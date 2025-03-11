@@ -97,6 +97,9 @@ class ThermalImageOverlay(QWidget):
             del self.calibration_points[index]
             self.update()  # Trigger repaint
             return True
+        else:
+            # Log an error if index is out of bounds
+            print(f"Error: Cannot remove point at index {index}. Only have {len(self.calibration_points)} points.")
         return False
     
     def clear_calibration_points(self):
@@ -279,7 +282,7 @@ class ThermalImageView(QLabel):
     def remove_calibration_point(self, index):
         """Remove a point from the calibration points list."""
         return self.overlay.remove_calibration_point(index)
-    
+        
     def clear_calibration_points(self):
         """Clear all calibration points."""
         self.overlay.clear_calibration_points()
@@ -373,6 +376,11 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.last_raw_values = {}  # Dictionary to store raw values by coordinates
         self.image_mutex = QMutex()  # For thread safety
         self.raw_value_mutex = QMutex()  # Additional mutex for raw values
+        
+        # Add these new tracking variables
+        self.has_valid_current_image = False
+        self.last_16bit_timestamp = 0
+        self.last_8bit_timestamp = 0
         
         # Initialize mutex for service call tracking
         self.service_mutex = QMutex()
@@ -606,14 +614,14 @@ class ThermalCalibrationPlugin(PyPlugin):
         # Image subscribers for both 16-bit and 8-bit thermal streams
         self.image_16bit_sub = self._node.create_subscription(
             Image,
-            '/mono16_converter/image',  # 16-bit thermal image used for calibration
+            'image_raw',  # 16-bit thermal image used for calibration (30 fps)
             self._image_16bit_callback,
             10
         )
         
         self.image_8bit_sub = self._node.create_subscription(
             Image,
-            '/image_raw/mono8',  # 8-bit visualization stream
+            'image_raw/mono8',  # 8-bit visualization stream (2 fps)
             self._image_8bit_callback,
             10
         )
@@ -722,6 +730,11 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Convert ROS image message to OpenCV image
             with QMutexLocker(self.image_mutex):
                 self.current_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono16")
+                self._node.get_logger().debug(f"Received 16-bit image: {self.current_image.shape}")
+                # Set a flag to indicate we have a valid image
+                self.has_valid_current_image = True
+                # Store the timestamp for debugging
+                self.last_16bit_timestamp = time.time()
             
             # Process this image for display if we don't have an 8-bit stream
             if not hasattr(self, 'has_8bit_stream') or not self.has_8bit_stream:
@@ -752,22 +765,23 @@ class ThermalCalibrationPlugin(PyPlugin):
                 # Only update if we haven't processed this coordinate yet
                 if not coord_processed:
                     with QMutexLocker(self.image_mutex):
-                        if self.current_image is not None and 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                            # Get raw value from current frame and store it
-                            current_raw = int(self.current_image[y, x])
-                            
-                            with QMutexLocker(self.raw_value_mutex):
-                                self.last_raw_values[coord_key] = current_raw
+                        if self.current_image is not None:
+                            if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
+                                # Get raw value from current frame and store it
+                                current_raw = int(self.current_image[y, x])
                                 
-                                # Only update if we don't have a current raw value yet
-                                if self.current_raw_value is None:
-                                    self.current_raw_value = current_raw
-                                    # Use signal to update UI from main thread
-                                    self.signal_helper.raw_value_update_signal.emit(f"Raw value: {current_raw}")
+                                with QMutexLocker(self.raw_value_mutex):
+                                    self.last_raw_values[coord_key] = current_raw
                                     
-                                    # Also call the service to get a more reliable value
-                                    self._call_get_raw_value(x, y)
-            
+                                    # Only update if we don't have a current raw value yet
+                                    if self.current_raw_value is None:
+                                        self.current_raw_value = current_raw
+                                        # Use signal to update UI from main thread
+                                        self.signal_helper.raw_value_update_signal.emit(f"Raw value: {current_raw}")
+                                        
+                                        # Also call the service to get a more reliable value
+                                        self._call_get_raw_value(x, y)
+        
         except Exception as e:
             self._node.get_logger().error(f'Error processing 16-bit image: {e}')
             self._node.get_logger().error(traceback.format_exc())
@@ -1093,9 +1107,16 @@ class ThermalCalibrationPlugin(PyPlugin):
                 # Remove from our local list
                 self.calibration_points.pop()
                 
-                # Remove from image view
-                if self.image_view.calibration_points:
-                    self.image_view.remove_calibration_point(len(self.image_view.calibration_points) - 1)
+                # Remove from image view overlay
+                try:
+                    # Access the overlay's calibration points directly to check if there are any
+                    if hasattr(self.image_view, 'overlay') and hasattr(self.image_view.overlay, 'calibration_points') and self.image_view.overlay.calibration_points:
+                        self.image_view.overlay.remove_calibration_point(len(self.image_view.overlay.calibration_points) - 1)
+                    else:
+                        self._node.get_logger().warn("No overlay calibration points to remove")
+                except Exception as e:
+                    self._node.get_logger().error(f'Error removing point from overlay: {e}')
+                    self._node.get_logger().error(traceback.format_exc())
                 
                 # Update UI via signal
                 self.signal_helper.points_table_update_signal.emit()
@@ -1116,6 +1137,7 @@ class ThermalCalibrationPlugin(PyPlugin):
             
         except Exception as e:
             self._node.get_logger().error(f'Error removing last point: {e}')
+            self._node.get_logger().error(traceback.format_exc())
 
     def _on_calibrate_clicked(self):
         """Handle click on calibrate button."""

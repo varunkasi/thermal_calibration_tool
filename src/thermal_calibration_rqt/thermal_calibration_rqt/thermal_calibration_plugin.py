@@ -1174,7 +1174,7 @@ class ThermalCalibrationPlugin(PyPlugin):
         finally:
             # Reset the flag
             self._save_in_progress = False
-
+    
     def _on_cancel_temp_clicked(self):
         """Handle click on cancel temperature button."""
         # Hide temperature input and re-enable the enter temperature button
@@ -1254,7 +1254,6 @@ class ThermalCalibrationPlugin(PyPlugin):
         except Exception as e:
             self._node.get_logger().error(f'Error removing last point: {e}')
             self._node.get_logger().error(traceback.format_exc())
-
     def _on_calibrate_clicked(self):
         """Handle click on calibrate button."""
         if len(self.calibration_points) < 2:
@@ -1966,7 +1965,6 @@ class ThermalCalibrationPlugin(PyPlugin):
             self._node.get_logger().error(f'Error calling clear_calibration_data service: {e}')
             self._update_service_status_indicators(False)
             return False
-
 
     def _handle_service_timeout(self, call_key, service_type):
         """Handle timeouts for service calls."""

@@ -1275,15 +1275,7 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.calibrate_btn.setEnabled(False)
         self.calibrate_btn.setText("Calibrating...")
         
-        # Create progress dialog
-        self.calibration_progress = QProgressDialog("Performing calibration...", None, 0, 0, self._widget)
-        self.calibration_progress.setWindowModality(Qt.WindowModal)
-        self.calibration_progress.setMinimumDuration(500)  # Show after 500ms
-        self.calibration_progress.setCancelButton(None)  # Hide cancel button
-        self.calibration_progress.setWindowTitle("Calibration")
-        self.calibration_progress.show()
-        
-        # Perform calibration
+        # Perform calibration (without creating a progress dialog)
         self._call_perform_calibration(model_type, degree)
     
     def _on_export_clicked(self):
@@ -1692,18 +1684,9 @@ class ThermalCalibrationPlugin(PyPlugin):
                                     "Calibration is already in progress. Please wait.")
                 return
         
-        # Update UI directly in the main GUI thread
+        # Update UI directly in the main GUI thread to show process is happening
         self.calibrate_btn.setEnabled(False)
         self.calibrate_btn.setText("Calibrating...")
-        
-        # Create and show progress dialog in the main thread
-        # Ensure QProgressDialog is properly imported at the top of the file
-        self.calibration_progress = QProgressDialog("Performing calibration...", "Cancel", 0, 0, self._widget)
-        self.calibration_progress.setWindowModality(Qt.WindowModal)
-        self.calibration_progress.setMinimumDuration(500)  # Show after 500ms
-        self.calibration_progress.setCancelButton(None)  # Hide cancel button
-        self.calibration_progress.setWindowTitle("Calibration")
-        self.calibration_progress.show()
         
         # Proceed with service call
         request = PerformCalibration.Request()
@@ -1739,15 +1722,13 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Clean up UI in case of error
             self._node.get_logger().error(f'Error calling perform_calibration service: {e}')
             
-            if hasattr(self, 'calibration_progress') and self.calibration_progress:
-                self.calibration_progress.hide()
-                
-            QMessageBox.warning(self._widget, "Service Error", 
-                            f"Error performing calibration: {str(e)}")
-            
             # Make sure the button is re-enabled in case of error
             self.calibrate_btn.setEnabled(True)
             self.calibrate_btn.setText("Calibrate")
+            
+            # Show error to user
+            QMessageBox.warning(self._widget, "Service Error", 
+                            f"Error performing calibration: {str(e)}")
             
             # Update service status
             self._update_service_status_indicators(False)
@@ -1794,14 +1775,18 @@ class ThermalCalibrationPlugin(PyPlugin):
     @Slot(object)
     def _handle_calibration_complete(self, future):
         """Handle calibration service completion in the main thread."""
-        # Re-enable the calibrate button
+        # Re-enable the calibrate button immediately
         self.calibrate_btn.setEnabled(True)
         self.calibrate_btn.setText("Calibrate")
         
-        # Hide the progress dialog
-        if hasattr(self, 'calibration_progress') and self.calibration_progress:
-            self.calibration_progress.close()
-            self.calibration_progress = None
+        # Make sure any progress dialog is closed and cleaned up
+        if hasattr(self, 'calibration_progress') and self.calibration_progress is not None:
+            try:
+                self.calibration_progress.close()
+            except Exception as e:
+                self._node.get_logger().error(f'Error closing calibration progress dialog: {e}')
+            finally:
+                self.calibration_progress = None
         
         try:
             response = future.result()
@@ -1825,10 +1810,6 @@ class ThermalCalibrationPlugin(PyPlugin):
                 
                 # Clear calibration points from overlay after successful calibration
                 self.image_view.clear_calibration_points()
-                
-                # Keep the points in the table for reference, but you could also clear them if preferred
-                # self.calibration_points = []
-                # self.signal_helper.points_table_update_signal.emit()
                 
                 # Enable the radiometric mode toggle
                 self.radio_toggle.setEnabled(True)
@@ -2024,20 +2005,18 @@ class ThermalCalibrationPlugin(PyPlugin):
                     self.calibrate_btn.setEnabled(True)
                     self.calibrate_btn.setText("Calibrate")
                     
-                    # Hide the progress dialog if it exists
-                    if hasattr(self, 'calibration_progress') and self.calibration_progress:
-                        self.calibration_progress.hide()
+                    # Clean up any progress dialog that might exist
+                    if hasattr(self, 'calibration_progress') and self.calibration_progress is not None:
+                        try:
+                            self.calibration_progress.close()
+                        except Exception:
+                            pass
+                        self.calibration_progress = None
                     
                     # Show a message to the user
                     QMessageBox.warning(self._widget, "Calibration Timeout", 
                                     "The calibration operation is taking too long. Please try again.")
-                elif service_type == "add_point":
-                    # No need to show a dialog, just log it
-                    self._node.get_logger().warn("Adding point to backend timed out - point is in UI only")
-                elif service_type == "clear_points":
-                    # Update UI to show something went wrong
-                    self.service_status_indicator.setStyleSheet("background-color: orange")
-                    self.service_status_label.setText("Service timeout - clearing points failed")
+                # ... other service types ...
                 
                 # Remove the pending service call from tracking
                 if call_key in self.pending_service_calls:

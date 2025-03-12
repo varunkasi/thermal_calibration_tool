@@ -10,12 +10,12 @@ from cv_bridge import CvBridge
 
 from python_qt_binding import loadUi
 from python_qt_binding.QtCore import Qt, QTimer, Signal, Slot, QObject, QMutex, QMutexLocker, pyqtSignal, QRect
-# Import QFontMetrics from QtGui instead of QtCore
+
 from python_qt_binding.QtGui import QImage, QPixmap, QPen, QColor, QPainter, QFontMetrics
 from python_qt_binding.QtWidgets import (QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
                                          QLabel, QSplitter, QTableWidget, QTableWidgetItem,
                                          QHeaderView, QMessageBox, QInputDialog, QDoubleSpinBox,
-                                         QComboBox, QFileDialog, QStyle, QSizePolicy)
+                                         QComboBox, QFileDialog, QStyle, QSizePolicy, QProgressDialog)
 
 import traceback
 import time
@@ -1676,6 +1676,7 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.calibrate_btn.setText("Calibrating...")
         
         # Create and show progress dialog in the main thread
+        # Ensure QProgressDialog is properly imported at the top of the file
         self.calibration_progress = QProgressDialog("Performing calibration...", "Cancel", 0, 0, self._widget)
         self.calibration_progress.setWindowModality(Qt.WindowModal)
         self.calibration_progress.setMinimumDuration(500)  # Show after 500ms
@@ -1729,7 +1730,7 @@ class ThermalCalibrationPlugin(PyPlugin):
             
             # Update service status
             self._update_service_status_indicators(False)
-    
+            
     def _perform_calibration_done(self, future):
         """Callback for perform_calibration service response."""
         # Re-enable the calibrate button

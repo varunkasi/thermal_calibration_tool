@@ -21,6 +21,11 @@ from thermal_calibration_interfaces.srv import (
     RawToTemperature, SaveCalibrationModel, LoadCalibrationModel
 )
 
+import yaml
+import traceback
+import threading
+import copy
+
 
 class ThermalCalibrationNode(Node):
     """
@@ -36,6 +41,7 @@ class ThermalCalibrationNode(Node):
     
     def __init__(self):
         super().__init__('thermal_calibration_node')
+        self.lock = threading.RLock()
         
         # Initialize variables
         self.cv_bridge = CvBridge()
@@ -117,12 +123,27 @@ class ThermalCalibrationNode(Node):
         self.get_logger().info(f'Thermal calibration node started')
         self.get_logger().info(f'Using data directory: {self.data_dir}')
         self.get_logger().info(f'Subscribed to thermal image topic: {image_topic}')
-    
+
+    # Add this helper method to ensure directory exists:
+    def _ensure_data_dir(self):
+        """Ensure the data directory exists."""
+        try:
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir, exist_ok=True)
+                self.get_logger().info(f'Created data directory: {self.data_dir}')
+        except Exception as e:
+            self.get_logger().error(f'Error creating data directory: {e}')
+            # Fallback to /tmp if the directory can't be created
+            self.data_dir = '/tmp'
+            self.get_logger().warn(f'Using fallback directory: {self.data_dir}')
+
+    # Modify the _thermal_image_callback method to use the lock:
     def _thermal_image_callback(self, msg):
         """Callback for thermal image."""
         try:
-            self.thermal_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono16")
-            self.get_logger().debug(f'Received thermal image: {self.thermal_image.shape}')
+            with self.lock:
+                self.thermal_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="mono16")
+                self.get_logger().debug(f'Received thermal image: {self.thermal_image.shape}')
         except Exception as e:
             self.get_logger().error(f'Error converting thermal image: {e}')
     
@@ -166,22 +187,23 @@ class ThermalCalibrationNode(Node):
         try:
             # Get raw value if not provided or zero
             raw_value = request.raw_value
-            if raw_value == 0 and self.thermal_image is not None:
-                # Try to read from the image
-                try:
-                    x, y = request.x, request.y
-                    raw_value = int(self.thermal_image[y, x])
-                    self.get_logger().info(f'Using raw value from image: {raw_value}')
-                except IndexError:
-                    response.success = False
-                    response.message = f'Coordinates ({x}, {y}) out of bounds'
-                    response.point_id = 0
-                    return response
+            if raw_value == 0:
+                # Thread-safe access to thermal image
+                with self.lock:
+                    if self.thermal_image is not None:
+                        try:
+                            x, y = request.x, request.y
+                            raw_value = int(self.thermal_image[y, x])
+                            self.get_logger().info(f'Using raw value from image: {raw_value}')
+                        except IndexError:
+                            response.success = False
+                            response.message = f'Coordinates ({x}, {y}) out of bounds'
+                            response.point_id = 0
+                            return response
             
             # Create a new calibration point
-            point_id = len(self.calibration_points) + 1
             point = {
-                'id': point_id,
+                'id': 0,  # Will be set within the lock
                 'x': request.x,
                 'y': request.y,
                 'raw_value': raw_value,
@@ -189,8 +211,11 @@ class ThermalCalibrationNode(Node):
                 'timestamp': datetime.now().isoformat()
             }
             
-            # Add to list
-            self.calibration_points.append(point)
+            # Thread-safe addition to calibration points
+            with self.lock:
+                point_id = len(self.calibration_points) + 1
+                point['id'] = point_id
+                self.calibration_points.append(point)
             
             response.success = True
             response.message = f'Added calibration point with ID {point_id}'
@@ -204,26 +229,31 @@ class ThermalCalibrationNode(Node):
             response.point_id = 0
             
             self.get_logger().error(f'Error adding calibration point: {e}')
+            self.get_logger().error(traceback.format_exc())
         
         return response
     
     def _perform_calibration_callback(self, request, response):
         """Service callback to perform calibration."""
-        if len(self.calibration_points) < 2:
-            response.success = False
-            response.message = 'At least 2 calibration points are required'
-            self.get_logger().warn('Calibration failed: Need at least 2 points')
-            return response
+        with self.lock:
+            if len(self.calibration_points) < 2:
+                response.success = False
+                response.message = 'At least 2 calibration points are required'
+                self.get_logger().warn('Calibration failed: Need at least 2 points')
+                return response
+            
+            # Make a copy of points to avoid race conditions
+            calibration_points = self.calibration_points.copy()
         
         try:
             model_type = request.model_type
             degree = request.degree
             
             # Extract raw values and temperatures from calibration points
-            raw_values = np.array([p['raw_value'] for p in self.calibration_points])
-            temps = np.array([p['reference_temp'] for p in self.calibration_points])
+            raw_values = np.array([p['raw_value'] for p in calibration_points])
+            temps = np.array([p['reference_temp'] for p in calibration_points])
             
-            # Sort points by raw value for better visualization
+            # Sort points by raw value for better visualization and analysis
             sort_idx = np.argsort(raw_values)
             raw_values = raw_values[sort_idx]
             temps = temps[sort_idx]
@@ -248,19 +278,25 @@ class ThermalCalibrationNode(Node):
                 rmse = np.sqrt(np.mean(residuals**2))
                 
                 # Create model dictionary
-                self.calibration_model = {
+                model = {
                     'model_type': model_type,
                     'degree': degree,
                     'parameters': coeffs.tolist(),
                     'r_squared': r_squared,
                     'rmse': rmse,
-                    'points_count': len(self.calibration_points),
+                    'points_count': len(calibration_points),
                     'raw_value_range': [int(min(raw_values)), int(max(raw_values))],
                     'timestamp': datetime.now().isoformat()
                 }
                 
-                # Generate a scatter plot of the calibration
-                self._generate_calibration_plot(raw_values, temps, predicted_temps)
+                # Store model with thread safety
+                with self.lock:
+                    self.calibration_model = model
+                
+                # Save the calibration to YAML file
+                yaml_path = self._save_calibration_yaml()
+                if yaml_path:
+                    self.get_logger().info(f'Calibration saved to: {yaml_path}')
                 
                 response.success = True
                 response.message = f'Calibration successful: {model_type} (degree {degree}), R²={r_squared:.4f}, RMSE={rmse:.2f}°C'
@@ -284,9 +320,61 @@ class ThermalCalibrationNode(Node):
             response.message = f'Error performing calibration: {str(e)}'
             
             self.get_logger().error(f'Calibration error: {e}')
+            self.get_logger().error(traceback.format_exc())
         
         return response
     
+    def _save_calibration_yaml(self):
+        """Save calibration parameters to a YAML file for easy transfer."""
+        # Thread-safe access to calibration model
+        with self.lock:
+            if self.calibration_model is None:
+                self.get_logger().warn('No calibration model to save')
+                return None
+            
+            # Make a copy of calibration data to avoid race conditions
+            model = self.calibration_model.copy()
+            points = self.calibration_points.copy()
+            
+        try:
+            # Create a simplified version of the model with just the essential parameters
+            simplified_model = {
+                'model_type': model['model_type'],
+                'degree': model['degree'],
+                'coefficients': model['parameters'],
+                'raw_value_range': model['raw_value_range'],
+                'r_squared': model['r_squared'],
+                'rmse': model['rmse'],
+                'calibrated_on': model['timestamp']
+            }
+            
+            # Also add points used for calibration (useful for future reference)
+            simplified_model['calibration_points'] = [
+                {
+                    'raw_value': point['raw_value'],
+                    'reference_temp': point['reference_temp']
+                }
+                for point in points
+            ]
+            
+            # Create calibration directory if it doesn't exist
+            os.makedirs(self.data_dir, exist_ok=True)
+            
+            # Save to a YAML file
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            yaml_path = os.path.join(self.data_dir, f'thermal_calibration_{timestamp}.yaml')
+            
+            with open(yaml_path, 'w') as f:
+                yaml.dump(simplified_model, f, default_flow_style=False)
+                
+            self.get_logger().info(f'Calibration parameters saved to: {yaml_path}')
+            return yaml_path
+            
+        except Exception as e:
+            self.get_logger().error(f'Error saving calibration parameters to YAML: {e}')
+            self.get_logger().error(traceback.format_exc())
+            return None
+
     def _generate_calibration_plot(self, raw_values, temps, predicted_temps):
         """Generate a plot of the calibration and save it."""
         try:
@@ -329,10 +417,12 @@ class ThermalCalibrationNode(Node):
             return response
         
         try:
-            # Clear calibration points and model
-            self.calibration_points = []
-            self.calibration_model = None
-            
+            # Thread-safe clearing of calibration data
+            with self.lock:
+                # Clear calibration points and model
+                self.calibration_points = []
+                self.calibration_model = None
+                
             response.success = True
             response.message = 'Calibration data cleared'
             
@@ -343,24 +433,29 @@ class ThermalCalibrationNode(Node):
             response.message = f'Error clearing calibration data: {str(e)}'
             
             self.get_logger().error(f'Error clearing calibration data: {e}')
+            self.get_logger().error(traceback.format_exc())
         
         return response
     
     def _raw_to_temperature_callback(self, request, response):
         """Service callback to convert raw value to temperature."""
-        if self.calibration_model is None:
-            response.success = False
-            response.message = 'No calibration model available'
-            response.temperature = 0.0
-            return response
+        # Thread-safe access to calibration model
+        with self.lock:
+            if self.calibration_model is None:
+                response.success = False
+                response.message = 'No calibration model available'
+                response.temperature = 0.0
+                return response
+            
+            # Make a copy of the model to avoid race conditions
+            model = self.calibration_model.copy()
+            coeffs = model['parameters'].copy() if 'parameters' in model else []
         
         try:
             raw_value = request.raw_value
             
             # Apply calibration model
-            if self.calibration_model['model_type'] == "polynomial":
-                coeffs = self.calibration_model['parameters']
-                
+            if model['model_type'] == "polynomial":
                 # Calculate temperature using polynomial
                 p = np.poly1d(coeffs)
                 temp = float(p(raw_value))
@@ -373,7 +468,7 @@ class ThermalCalibrationNode(Node):
                 
             else:
                 response.success = False
-                response.message = f'Unsupported model type: {self.calibration_model["model_type"]}'
+                response.message = f'Unsupported model type: {model["model_type"]}'
                 response.temperature = 0.0
                 
         except Exception as e:
@@ -382,6 +477,7 @@ class ThermalCalibrationNode(Node):
             response.temperature = 0.0
             
             self.get_logger().error(f'Error in raw_to_temperature: {e}')
+            self.get_logger().error(traceback.format_exc())
         
         return response
     

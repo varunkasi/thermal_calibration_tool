@@ -680,6 +680,11 @@ class ThermalCalibrationPlugin(PyPlugin):
         
         # Wait for services to be available
         self._node.get_logger().info('Waiting for thermal calibration services...')
+        
+        # Set up periodic service check
+        self.service_check_timer = QTimer(self._widget)
+        self.service_check_timer.timeout.connect(self._try_reconnect_services)
+        self.service_check_timer.start(5000)  # Check services every 5 seconds
 
     @Slot(object)
     def _update_image_display_from_signal(self, img_data):
@@ -976,47 +981,10 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Enable the button to enter temperature
             self.enter_temp_btn.setEnabled(True)
             
-            # Define coord_key here so it's available throughout the method
-            coord_key = f"{x},{y}"
-            
-            # Immediately read the raw value from the current frame if available
-            raw_value = None
-            try:
-                with QMutexLocker(self.image_mutex):
-                    if self.current_image is not None:
-                        if 0 <= y < self.current_image.shape[0] and 0 <= x < self.current_image.shape[1]:
-                            raw_value = int(self.current_image[y, x])
-                            self._node.get_logger().info(f'Immediate raw value from image: {raw_value}')
-                        else:
-                            self._node.get_logger().warn(f'Coordinates ({x}, {y}) out of bounds')
-                    else:
-                        self._node.get_logger().warn(f'No current image available for immediate raw value')
-            except Exception as e:
-                self._node.get_logger().error(f'Error reading immediate raw value: {e}')
-            
-            # If we got a raw value, store it
-            if raw_value is not None:
-                with QMutexLocker(self.raw_value_mutex):
-                    self.current_raw_value = raw_value
-                    self.last_raw_values[coord_key] = raw_value
-                self.signal_helper.raw_value_update_signal.emit(f"Raw value: {raw_value}")
-            # If we don't have an immediate value but have a cached one, use it
-            elif coord_key in self.last_raw_values:
-                with QMutexLocker(self.raw_value_mutex):
-                    cached_raw = self.last_raw_values[coord_key]
-                    self.current_raw_value = cached_raw
-                self.signal_helper.raw_value_update_signal.emit(f"Raw value: {cached_raw}")
-                self._node.get_logger().info(f'Using cached raw value: {cached_raw}')
-            else:
-                with QMutexLocker(self.raw_value_mutex):
-                    self.current_raw_value = None
-                self.signal_helper.raw_value_update_signal.emit("Raw value: waiting for image...")
-                self._node.get_logger().warn(f'Failed to set raw value from any source')
-            
-            # Call the service to get raw value as a backup/verification
+            # Get the raw value from the current image
             self._call_get_raw_value(x, y)
             
-            # Update temperature display if in radiometric mode and we have a value
+            # Update temperature display if in radiometric mode
             if self.radiometric_mode and self.calibration_model:
                 with QMutexLocker(self.raw_value_mutex):
                     current_raw = self.current_raw_value
@@ -1025,6 +993,10 @@ class ThermalCalibrationPlugin(PyPlugin):
     
     def _update_temperature_display(self, raw_value):
         """Update the temperature display for a given raw value using the current calibration model."""
+        if not self.radiometric_mode or not self.calibration_model:
+            return
+            
+        # Call service to get temperature
         self._call_raw_to_temperature(raw_value)
     
     def _on_enter_temp_clicked(self):
@@ -1254,16 +1226,35 @@ class ThermalCalibrationPlugin(PyPlugin):
         except Exception as e:
             self._node.get_logger().error(f'Error removing last point: {e}')
             self._node.get_logger().error(traceback.format_exc())
+    
     def _on_calibrate_clicked(self):
         """Handle click on calibrate button."""
         if len(self.calibration_points) < 2:
             QMessageBox.warning(self._widget, "Insufficient Data", 
-                               "At least 2 calibration points are required.")
+                            "At least 2 calibration points are required.")
             return
             
         # Get model type and degree
         model_type = self.model_type_combo.currentText().lower()
         degree = int(self.degree_spin.value())
+        
+        # Basic validation
+        if degree < 1 or degree > 5:
+            QMessageBox.warning(self._widget, "Invalid Degree", 
+                            "Polynomial degree must be between 1 and 5.")
+            return
+        
+        # Update UI to show we're calibrating
+        self.calibrate_btn.setEnabled(False)
+        self.calibrate_btn.setText("Calibrating...")
+        
+        # Create progress dialog
+        self.calibration_progress = QProgressDialog("Performing calibration...", None, 0, 0, self._widget)
+        self.calibration_progress.setWindowModality(Qt.WindowModal)
+        self.calibration_progress.setMinimumDuration(500)  # Show after 500ms
+        self.calibration_progress.setCancelButton(None)  # Hide cancel button
+        self.calibration_progress.setWindowTitle("Calibration")
+        self.calibration_progress.show()
         
         # Perform calibration
         self._call_perform_calibration(model_type, degree)
@@ -1304,8 +1295,10 @@ class ThermalCalibrationPlugin(PyPlugin):
             self.radio_toggle.setText("Disable Radiometric Mode")
             # If we have a selected point and a model, update the temperature
             if hasattr(self, 'selected_coords') and self.selected_coords and self.calibration_model:
-                if hasattr(self, 'current_raw_value'):
-                    self._update_temperature_display(self.current_raw_value)
+                with QMutexLocker(self.raw_value_mutex):
+                    current_raw = self.current_raw_value
+                if current_raw is not None:
+                    self._update_temperature_display(current_raw)
         else:
             self.radio_toggle.setText("Enable Radiometric Mode")
             # Update temperature label to show it's disabled
@@ -1637,7 +1630,8 @@ class ThermalCalibrationPlugin(PyPlugin):
                 self.get_raw_value_client.service_is_ready() and
                 self.add_calibration_point_client.service_is_ready() and
                 self.perform_calibration_client.service_is_ready() and
-                self.clear_calibration_data_client.service_is_ready()
+                self.clear_calibration_data_client.service_is_ready() and
+                self.raw_to_temperature_client.service_is_ready()
             )
         else:
             services_ready = connected
@@ -1800,6 +1794,11 @@ class ThermalCalibrationPlugin(PyPlugin):
                 
                 # Update UI
                 self.signal_helper.cal_results_update_signal.emit()
+                
+                # Enable the radiometric mode toggle
+                self.radio_toggle.setEnabled(True)
+                
+                # Show success message
                 QMessageBox.information(self._widget, "Success", response.message)
             else:
                 QMessageBox.warning(self._widget, "Calibration Error", response.message)
@@ -2050,6 +2049,7 @@ class ThermalCalibrationPlugin(PyPlugin):
                 self.signal_helper.temp_update_signal.emit("Temperature: -")
         except Exception as e:
             self._node.get_logger().error(f'Service call failed: {e}')
+            self.signal_helper.temp_update_signal.emit("Temperature: Error")
     
     def _call_save_calibration_model(self, filename):
         """Call the save_calibration_model service with tracking."""
@@ -2191,10 +2191,9 @@ class ThermalCalibrationPlugin(PyPlugin):
         # Update the UI status indicators based on service availability
         self._update_service_status_indicators(all_ready)
         
-        # If any service was reconnected, extra update
+        # If any service was reconnected, update UI
         if reconnected:
-            # Check if we're out of sync and need to rebuild
-            self._node.get_logger().info("Service reconnected - checking if sync is needed")
+            self._node.get_logger().info("Service reconnected - updating UI")
 
     def resizeEvent(self, event):
         """Handle resize events."""

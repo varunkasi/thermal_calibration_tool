@@ -981,22 +981,49 @@ class ThermalCalibrationPlugin(PyPlugin):
             # Enable the button to enter temperature
             self.enter_temp_btn.setEnabled(True)
             
-            # Get the raw value from the current image
-            self._call_get_raw_value(x, y)
-            
-            # Update temperature display if in radiometric mode
-            if self.radiometric_mode and self.calibration_model:
+            # Get the raw value from the current image (directly and via service)
+            raw_value = self._get_current_raw_value_from_buffer(x, y)
+            if raw_value is not None:
                 with QMutexLocker(self.raw_value_mutex):
-                    current_raw = self.current_raw_value
-                if current_raw is not None:
-                    self._update_temperature_display(current_raw)
+                    self.current_raw_value = raw_value
+                    # Cache the value by coordinates
+                    coord_key = f"{x},{y}"
+                    self.last_raw_values[coord_key] = raw_value
+                
+                # Update the UI
+                self.signal_helper.raw_value_update_signal.emit(f"Raw value: {raw_value}")
+                
+                # Update temperature if in radiometric mode
+                if self.radiometric_mode and self.calibration_model:
+                    self._update_temperature_display(raw_value)
+            
+            # Also call the service to get raw value for verification
+            self._call_get_raw_value(x, y)
     
     def _update_temperature_display(self, raw_value):
         """Update the temperature display for a given raw value using the current calibration model."""
-        if not self.radiometric_mode or not self.calibration_model:
+        if not self.radiometric_mode or not self.calibration_model or raw_value is None:
             return
-            
-        # Call service to get temperature
+        
+        # Log that we're trying to update the temperature
+        self._node.get_logger().info(f'Updating temperature display for raw value: {raw_value}')
+        
+        # First, attempt to calculate the temperature directly if we have the model
+        try:
+            model_params = self.calibration_model['parameters']
+            if model_params and len(model_params) > 0:
+                # Use numpy's poly1d to evaluate the polynomial
+                import numpy as np
+                p = np.poly1d(model_params)
+                temp = float(p(raw_value))
+                
+                # Update the UI
+                self.signal_helper.temp_update_signal.emit(f"Temperature: {temp:.1f}°C")
+                self._node.get_logger().info(f'Direct calculation: Raw value {raw_value} -> {temp:.1f}°C')
+        except Exception as e:
+            self._node.get_logger().error(f'Error calculating temperature directly: {e}')
+        
+        # Also call service for verification (and to ensure backend is in sync)
         self._call_raw_to_temperature(raw_value)
     
     def _on_enter_temp_clicked(self):
@@ -1771,9 +1798,10 @@ class ThermalCalibrationPlugin(PyPlugin):
         self.calibrate_btn.setEnabled(True)
         self.calibrate_btn.setText("Calibrate")
         
-        # Hide the progress dialog if it exists
+        # Hide the progress dialog
         if hasattr(self, 'calibration_progress') and self.calibration_progress:
-            self.calibration_progress.hide()
+            self.calibration_progress.close()
+            self.calibration_progress = None
         
         try:
             response = future.result()
@@ -1794,6 +1822,13 @@ class ThermalCalibrationPlugin(PyPlugin):
                 
                 # Update UI
                 self.signal_helper.cal_results_update_signal.emit()
+                
+                # Clear calibration points from overlay after successful calibration
+                self.image_view.clear_calibration_points()
+                
+                # Keep the points in the table for reference, but you could also clear them if preferred
+                # self.calibration_points = []
+                # self.signal_helper.points_table_update_signal.emit()
                 
                 # Enable the radiometric mode toggle
                 self.radio_toggle.setEnabled(True)
